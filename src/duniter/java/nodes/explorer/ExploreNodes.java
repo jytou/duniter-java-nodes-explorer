@@ -146,9 +146,9 @@ public class ExploreNodes
 					Map<String, String> receivedURL2EP = fetchJSonResponses(node, endPoints, "/node/summary");
 					for (String url : receivedURL2EP.keySet())
 					{
-						if (mJSonResults.containsKey(url))
+						final JSONObject info = mJSonResults.remove(url);
+						if (info != null)
 						{
-							final JSONObject info = mJSonResults.remove(url);
 							final JSONObject duniter = (JSONObject)info.get("duniter");
 							if (node.getVersion() == null)
 								node.setVersion((String)duniter.get("version"));
@@ -164,9 +164,9 @@ public class ExploreNodes
 						receivedURL2EP = fetchJSonResponses(node, "/network/peers");
 						for (String url : receivedURL2EP.keySet())
 						{
-							if (mJSonResults.containsKey(url))
+							final JSONObject peersResult = mJSonResults.remove(url);
+							if (peersResult != null)
 							{
-								final JSONObject peersResult = mJSonResults.remove(url);
 								final JSONArray peersArray = (JSONArray)peersResult.get("peers");
 								for (Object peerObject : peersArray)
 								{
@@ -216,9 +216,9 @@ public class ExploreNodes
 						receivedURL2EP = fetchJSonResponses(node, "/blockchain/current");
 						for (String url : receivedURL2EP.keySet())
 						{
-							if (mJSonResults.containsKey(url))
+							final JSONObject curblock = mJSonResults.remove(url);
+							if (curblock != null)
 							{
-								final JSONObject curblock = mJSonResults.remove(url);
 								final long blockNum = (long)curblock.get("number");
 								final String hash = (String)curblock.get("inner_hash");
 								final long nonce = (long)curblock.get("nonce");
@@ -241,10 +241,10 @@ public class ExploreNodes
 						receivedURL2EP = fetchJSonResponses(node, "/network/peering");
 						for (String url : receivedURL2EP.keySet())
 						{
-							if (mJSonResults.containsKey(url))
+							final JSONObject peeringInfo = mJSonResults.remove(url);
+							if (peeringInfo != null)
 							{
-								final JSONObject curblock = mJSonResults.remove(url);
-								final String pubkey = (String)curblock.get("pubkey");
+								final String pubkey = (String)peeringInfo.get("pubkey");
 								node.setPubKey(pubkey);
 							}
 							else
@@ -317,9 +317,8 @@ public class ExploreNodes
 						new MultiConnectThread().start();
 					}
 					pNode.setEPUp(waitingURL2EP.get(url), false);
-					waitingURL2EP.remove(retrievedURL);
 					mJSonResults.remove(retrievedURL);
-					mURLErrors.remove(retrievedURL);
+					pNode.addEndPointError(waitingURL2EP.remove(retrievedURL), mURLErrors.remove(retrievedURL));
 				}
 				break;
 			}
@@ -382,9 +381,9 @@ public class ExploreNodes
 		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members");
 		for (String url : membersUrl.keySet())
 		{
-			if (mJSonResults.containsKey(url))
+			final JSONObject jsonResult = mJSonResults.remove(url);
+			if (jsonResult != null)
 			{
-				final JSONObject jsonResult = mJSonResults.remove(url);
 				final JSONArray jsonMembers = (JSONArray)jsonResult.get("results");
 				for (Object objectMember : jsonMembers)
 				{
@@ -480,11 +479,21 @@ public class ExploreNodes
 	private void showNodesForHash(Map<String, List<Node>> pHash2Nodes, String pHash, final boolean pShowNodeInfos)
 	{
 		final List<Node> sortedNodes = new ArrayList<>(pHash2Nodes.get(pHash));
+		for (Node node : sortedNodes)
+			node.setMember(mWorld.getMember(node.getPubKey()));
+
 		sortedNodes.sort(new Comparator<Node>()
 		{
 			@Override
 			public int compare(Node pO1, Node pO2)
 			{
+				if (pO1.getMember() == null)
+					if (pO2.getMember() != null)
+						return 1;
+					else;
+				else
+					if (pO2.getMember() == null)
+						return -1;
 				final long r1 = pO1.getResponseTime();
 				final long r2 = pO2.getResponseTime();
 				if (r1 < r2)
@@ -535,14 +544,26 @@ public class ExploreNodes
 				}
 			}
 
-			String memberInfo = node.getPubKey();
-			Member member = mWorld.getMember(memberInfo);
-			if (member != null)
-				memberInfo = member.getName();
+			if (!extraInfo.isEmpty())
+				extraInfo = " (" + extraInfo + ")";
+			if (pShowNodeInfos)
+			{
+				String memberInfo = node.getPubKey();
+				if (node.getMember() != null)
+					memberInfo = node.getMember().getName();
+				System.out.println("\t" + normalize(memberInfo, 15, true) + " " + normalize(node.getVersion(), 6, true) + " " + normalize("" + node.getResponseTime() + "ms", 8, false) + " " + nodeInfo + extraInfo);
+			}
 			else
-				memberInfo = "";
-			System.out.println("\t" + nodeInfo + (pShowNodeInfos ? " (" + node.getVersion() + " - " + node.getResponseTime() + "ms)" : "") + " " + memberInfo + " " + extraInfo);
+				System.out.println("\t" + nodeInfo + " " + extraInfo);
 		}
+	}
+
+	private String normalize(String pMemberInfo, int pLength, boolean pRight)
+	{
+		if (pMemberInfo.length() > pLength)
+			return pMemberInfo.substring(0, pLength);
+		else
+			return String.format("%" + (pRight ? "-" : "") + pLength + "s", pMemberInfo);
 	}
 
 }

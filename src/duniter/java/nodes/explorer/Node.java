@@ -18,6 +18,7 @@ public class Node
 	private String mVersion;
 	private String mCurrency;
 	private String mPubKey;
+	private Member mMember;
 	private Block mCurrentBlock;
 	private Queue<Long> mResponseTime = new LinkedList<>();
 	private AtomicLong mUpTicks = new AtomicLong(0);
@@ -168,5 +169,15 @@ public class Node
 				totalRT += rt.longValue();
 			return totalRT / mResponseTime.size();
 		}
+	}
+
+	public Member getMember()
+	{
+		return mMember;
+	}
+
+	public void setMember(Member pMember)
+	{
+		mMember = pMember;
 	}
 }
