@@ -375,10 +375,9 @@ public class ExploreNodes
 			new MultiConnectThread().start();
 	}
 
-	public void explore() throws InterruptedException
+	public void explore(String pRootNode) throws InterruptedException
 	{
-		final String rootNode = "https://g1.duniter.org:443";
-		final Node root = new Node(new HashSet<>(Arrays.asList(new String[] {rootNode})));
+		final Node root = new Node(new HashSet<>(Arrays.asList(new String[] {pRootNode})));
 		// In the meantime, get the members
 		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members");
 		for (String url : membersUrl.keySet())
@@ -443,7 +442,7 @@ public class ExploreNodes
 			for (String hash : sortedHashes)
 			{
 				final Block block = mWorld.getBlockFromHash(hash);
-				System.out.println("Block " + hash + " - " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + ":");
+				System.out.println("Block " + hash + " - " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + "):");
 				showNodesForHash(hash2Nodes, hash, true);
 			}
 			if (hash2Nodes.containsKey(NO_BLOCK_KEY) && (!hash2Nodes.get(NO_BLOCK_KEY).isEmpty()))
@@ -466,8 +465,11 @@ public class ExploreNodes
 
 	public static void main(String[] args) throws IOException, ParseException, InterruptedException
 	{
-		ExploreNodes exploreNodes = new ExploreNodes();
-		exploreNodes.explore();
+		final ExploreNodes exploreNodes = new ExploreNodes();
+		if (args.length > 1)
+			exploreNodes.explore(args[0]);
+		else
+			exploreNodes.explore("https://g1.duniter.org:443");
 	}
 
 	private static String getReadableTime(long pCurrentTimeMillis)
