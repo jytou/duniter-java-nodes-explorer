@@ -1,6 +1,5 @@
 package duniter.java.nodes.explorer;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -9,35 +8,22 @@ import java.util.Set;
 public class World
 {
 	private Map<String, Node> mEP2Node = new HashMap<>();// One endpoint to its node
-	private Map<Node, Set<String>> mNode2EPs = new HashMap<>();// Node to its currently known endpoints
+//	private Map<Node, Set<String>> mNode2EPs = new HashMap<>();// Node to its currently known endpoints
 	private Map<String, Member> mId2Member = new HashMap<>();
 	private Map<String, Member> mPK2Member = new HashMap<>();
 	private Map<String, Block> mHash2Block = new HashMap<>();
 
-	public void setNode(Node pNode)
-	{
-		synchronized (mNode2EPs)
-		{
-			if (mNode2EPs.containsKey(pNode))
-				for (String ep : mNode2EPs.get(pNode))
-					mEP2Node.remove(ep);
-			mNode2EPs.put(pNode, new HashSet<>(pNode.getEndPoints()));
-			for (String ep : pNode.getEndPoints())
-				mEP2Node.put(ep, pNode);
-		}
-	}
-
 	public Set<Node> getAllNodes()
 	{
-		synchronized (mNode2EPs)
+		synchronized (mEP2Node)
 		{
-			return new HashSet<Node>(mNode2EPs.keySet());
+			return new HashSet<Node>(mEP2Node.values());
 		}
 	}
 
 	public Node getNodeForEP(String pEp)
 	{
-		synchronized (mNode2EPs)
+		synchronized (mEP2Node)
 		{
 			return mEP2Node.get(pEp);
 		}
@@ -82,5 +68,23 @@ public class World
 		{
 			return new HashMap<>(mPK2Member);
 		}
+	}
+
+	public void addEndPoint(String pEpString, Node pNode)
+	{
+		synchronized (mEP2Node)
+		{
+			mEP2Node.put(pEpString, pNode);
+		}
+		pNode.addEndPoint(pEpString);
+	}
+
+	public void removeEndPoint(String pEpString, Node pNode)
+	{
+		synchronized (mEP2Node)
+		{
+			mEP2Node.remove(pEpString, pNode);
+		}
+		pNode.removeEndPoint(pEpString);
 	}
 }

@@ -6,6 +6,8 @@ import java.io.InputStreamReader;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,10 +23,16 @@ import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
@@ -42,6 +50,8 @@ public class ExploreNodes
 	private Semaphore mFinished = new Semaphore(0);
 
 	private BlockingQueue<String> mURLs = new LinkedBlockingQueue<>();
+	private ConcurrentSkipListSet<String> mPreIgnoreCertificateErrors = new ConcurrentSkipListSet<>();
+	private ConcurrentSkipListSet<String> mCertificatesInError = new ConcurrentSkipListSet<>();
 	private ConcurrentMap<String, BlockingQueue<String>> mURLLocks = new ConcurrentHashMap<>();
 	private ConcurrentMap<String, JSONObject> mJSonResults = new ConcurrentHashMap<>();
 	private ConcurrentMap<String, String> mURLErrors = new ConcurrentHashMap<>();
@@ -97,13 +107,37 @@ public class ExploreNodes
 
 		private JSONObject fetchInfo(String pURL) throws MalformedURLException, IOException, ParseException
 		{
-			final URLConnection con = (URLConnection)new URL(pURL).openConnection();
+			URLConnection con = (URLConnection)new URL(pURL).openConnection();
 			con.setReadTimeout(10000);
 			InputStream ins = null;
+			if (mPreIgnoreCertificateErrors.contains(pURL) && (mCertificatesInError.contains(pURL)))
+				ignoreCertificateErrorsOnConnection(con);
 			Object obj = null;
 			try
 			{
-				ins = con.getInputStream();
+				try
+				{
+					ins = con.getInputStream();
+					// If we were not pre-ignoring bad certificates and the certificate is marked in error, clear the error
+					if (mCertificatesInError.contains(pURL) && (!mPreIgnoreCertificateErrors.contains(pURL)))
+						mCertificatesInError.remove(pURL);
+				}
+				catch (Exception e)
+				{
+					// Could it be that it is a certificate error?
+					if ((con instanceof HttpsURLConnection) && (!mPreIgnoreCertificateErrors.contains(pURL)))
+					{
+						con = (URLConnection)new URL(pURL).openConnection();
+						con.setReadTimeout(10000);
+						ignoreCertificateErrorsOnConnection(con);
+						if (ins == null)
+							ins = con.getInputStream();
+						// Now that we are connected with the ignoring, flag it
+						mCertificatesInError.add(pURL);
+					}
+					else
+						throw e;
+				}
 				InputStreamReader isr = null;
 				try
 				{
@@ -124,6 +158,29 @@ public class ExploreNodes
 			}
 			return (JSONObject)obj;
 		}
+
+		private void ignoreCertificateErrorsOnConnection(final URLConnection pConn)
+		{
+			HttpsURLConnection httpsconn = (HttpsURLConnection)pConn;
+			TrustManager[] trustAllCerts = new TrustManager[]{
+				new X509TrustManager()
+				{
+					public X509Certificate[] getAcceptedIssuers(){ return null; }
+					public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+					public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+				}
+			};
+			try
+			{
+				SSLContext sslContext = SSLContext.getInstance("SSL");
+				sslContext.init(null, trustAllCerts, new SecureRandom());
+				httpsconn.setSSLSocketFactory(sslContext.getSocketFactory());
+			}
+			catch (Exception e)
+			{
+				// could not switch the socket factory, ignore
+			}
+		}
 	}
 
 	private class NodeAnalyzer extends Thread
@@ -143,25 +200,49 @@ public class ExploreNodes
 					}
 					final Set<String> endPoints = node.getEndPoints();
 //					System.out.println("Exploring " + endPoints.toString() + "... (" + mNodes2Explore.size() + " to go)");
-					Map<String, String> receivedURL2EP = fetchJSonResponses(node, endPoints, "/node/summary");
+
+					Map<String, String> receivedURL2EP = fetchJSonResponses(node, "/network/peering", false);
+					final Set<String> existingEndPoints = new HashSet<>(node.getEndPoints());
+					final Set<String> foundEndPoints = new HashSet<>();
 					for (String url : receivedURL2EP.keySet())
 					{
-						final JSONObject info = mJSonResults.remove(url);
-						if (info != null)
+						final JSONObject peeringInfo = mJSonResults.remove(url);
+						if (peeringInfo != null)
 						{
-							final JSONObject duniter = (JSONObject)info.get("duniter");
-							if (node.getVersion() == null)
-								node.setVersion((String)duniter.get("version"));
+							final String pubkey = (String)peeringInfo.get("pubkey");
+							node.setPubKey(pubkey);
+							final JSONArray raweps = (JSONArray)peeringInfo.get("endpoints");
+							for (Object epObject : raweps)
+							{
+								final String epString = (String)epObject;
+								final Set<String> eps = getEPStringsFromRawString(epString);
+								for (String ep : eps)
+								{
+									foundEndPoints.add(ep);
+									if (!existingEndPoints.contains(ep))
+										mWorld.addEndPoint(ep, node);
+								}
+							}
+							node.setEPUp(receivedURL2EP.get(url), true);
 						}
 						else
+						{
 							node.addEndPointError(receivedURL2EP.get(url), mURLErrors.remove(url));
+							node.setEPUp(receivedURL2EP.get(url), false);
+						}
+					}
+					if (!receivedURL2EP.isEmpty())
+					{
+						existingEndPoints.removeAll(foundEndPoints);
+						for (String goneEP : existingEndPoints)
+							mWorld.removeEndPoint(goneEP, node);
 					}
 					node.setUp(!receivedURL2EP.isEmpty());
 
 					if (!receivedURL2EP.isEmpty())
 					{
 						// for nodes that are UP, let's fetch some more info
-						receivedURL2EP = fetchJSonResponses(node, "/network/peers");
+						receivedURL2EP = fetchJSonResponses(node, "/network/peers", true);
 						for (String url : receivedURL2EP.keySet())
 						{
 							final JSONObject peersResult = mJSonResults.remove(url);
@@ -177,19 +258,27 @@ public class ExploreNodes
 									for (Object endpointObject : enpointsArray)
 									{
 										final String endpointString = (String)endpointObject;
-										final String[] endpointElements = endpointString.split(" ");
-										final String header = endpointElements[0].equals("BMAS") ? "https://" : "http://";
-										final String port = endpointElements[endpointElements.length - 1];
-										for (int i = 1; i < endpointElements.length - 1; i++)
-										{
-											final String peerep = header + endpointElements[i] + ":" + port;
-											peers.add(peerep);
-											if (otherNode == null)
-												otherNode = mWorld.getNodeForEP(peerep);
-										}
+										final Set<String> peersfound = getEPStringsFromRawString(endpointString);
+										peers.addAll(peersfound);
+										if (otherNode == null)
+											for (String peerep : peersfound)
+												if (otherNode == null)
+													otherNode = mWorld.getNodeForEP(peerep);
 									}
 									if (otherNode == null)
+									{
 										otherNode = new Node(peers);
+										for (String peer : peers)
+											mWorld.addEndPoint(peer, otherNode);
+									}
+									else
+									{
+										Set<String> oldPeers = otherNode.getEndPoints();
+										Set<String> newPeers = new HashSet<>(peers);
+										newPeers.removeAll(oldPeers);
+										for (String peer : newPeers)
+											mWorld.addEndPoint(peer, otherNode);
+									}
 									synchronized (mNodesFound)
 									{
 										if (!mNodesFound.contains(otherNode))
@@ -200,8 +289,6 @@ public class ExploreNodes
 	//										System.out.println("Need to explore " + otherNode.getEndPoints().toString());
 										}
 									}
-									// TODO do it only when something has changed
-									mWorld.setNode(otherNode);
 								}
 								break;
 							}
@@ -213,7 +300,7 @@ public class ExploreNodes
 							}
 						}
 	
-						receivedURL2EP = fetchJSonResponses(node, "/blockchain/current");
+						receivedURL2EP = fetchJSonResponses(node, "/blockchain/current", true);
 						for (String url : receivedURL2EP.keySet())
 						{
 							final JSONObject curblock = mJSonResults.remove(url);
@@ -238,17 +325,18 @@ public class ExploreNodes
 								mURLErrors.remove(url);
 						}
 
-						receivedURL2EP = fetchJSonResponses(node, "/network/peering");
+						receivedURL2EP = fetchJSonResponses(node, endPoints, "/node/summary", true);
 						for (String url : receivedURL2EP.keySet())
 						{
-							final JSONObject peeringInfo = mJSonResults.remove(url);
-							if (peeringInfo != null)
+							final JSONObject info = mJSonResults.remove(url);
+							if (info != null)
 							{
-								final String pubkey = (String)peeringInfo.get("pubkey");
-								node.setPubKey(pubkey);
+								final JSONObject duniter = (JSONObject)info.get("duniter");
+								if (node.getVersion() == null)
+									node.setVersion((String)duniter.get("version"));
 							}
 							else
-								mURLErrors.remove(url);
+								node.addEndPointError(receivedURL2EP.get(url), mURLErrors.remove(url));
 						}
 					}
 
@@ -264,21 +352,32 @@ public class ExploreNodes
 				}
 			}
 		}
+
+		private Set<String> getEPStringsFromRawString(final String endpointString)
+		{
+			final String[] endpointElements = endpointString.split(" ");
+			final String header = endpointElements[0].equals("BMAS") ? "https://" : "http://";
+			final String port = endpointElements[endpointElements.length - 1];
+			final Set<String> peersfound = new HashSet<>();
+			for (int i = 1; i < endpointElements.length - 1; i++)
+				peersfound.add(header + endpointElements[i] + ":" + port);
+			return peersfound;
+		}
 	}
 
-	private Map<String, String> fetchJSonResponses(final Node pNode, final String pSuffix) throws InterruptedException
+	private Map<String, String> fetchJSonResponses(final Node pNode, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
 	{
-		Map<String, String> receivedURL2EP;
+		Map<String, String> receivedURL2EP = new HashMap<>();
 		if (pNode.getPreferredBMAS() != null)
-			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMAS()})), pSuffix);
-		else if (pNode.getPreferredBMA() != null)
-			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMA()})), pSuffix);
-		else
-			receivedURL2EP = fetchJSonResponses(pNode, pNode.getEndPoints(), pSuffix);
+			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMAS()})), pSuffix, pPreIgnoreCertificatesInError);
+		if (receivedURL2EP.isEmpty() || (pNode.getPreferredBMA() != null))
+			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMA()})), pSuffix, pPreIgnoreCertificatesInError);
+		if (receivedURL2EP.isEmpty())
+			receivedURL2EP = fetchJSonResponses(pNode, pNode.getEndPoints(), pSuffix, pPreIgnoreCertificatesInError);
 		return receivedURL2EP;
 	}
 
-	private Map<String, String> fetchJSonResponses(final Node pNode, final Set<String> pEndPoints, final String pSuffix) throws InterruptedException
+	private Map<String, String> fetchJSonResponses(final Node pNode, final Set<String> pEndPoints, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
 	{
 		final BlockingQueue<String> receivingQueue = new LinkedBlockingQueue<>();
 		final Map<String, String> waitingURL2EP = new HashMap<>();
@@ -286,7 +385,14 @@ public class ExploreNodes
 		{
 			final String url = ep + pSuffix;
 			waitingURL2EP.put(url, ep);
+			mURLErrors.remove(url);
 			mURLLocks.put(url, receivingQueue);
+			if (pNode.isEndPointCertificateError(ep))
+			{
+				mCertificatesInError.add(url);
+				if (pPreIgnoreCertificatesInError)
+					mPreIgnoreCertificateErrors.add(url);
+			}
 			mURLs.offer(url);
 		}
 		long time = System.currentTimeMillis();
@@ -316,9 +422,12 @@ public class ExploreNodes
 						connectThread.interrupt();
 						new MultiConnectThread().start();
 					}
-					pNode.setEPUp(waitingURL2EP.get(url), false);
+					String ep = waitingURL2EP.remove(retrievedURL);
+					mPreIgnoreCertificateErrors.remove(retrievedURL);
+					mCertificatesInError.remove(retrievedURL);
+					pNode.setEPUp(ep, false);
 					mJSonResults.remove(retrievedURL);
-					pNode.addEndPointError(waitingURL2EP.remove(retrievedURL), mURLErrors.remove(retrievedURL));
+					pNode.addEndPointError(ep, mURLErrors.remove(retrievedURL));
 				}
 				break;
 			}
@@ -327,28 +436,33 @@ public class ExploreNodes
 			{
 				isOK = mJSonResults.get(url) != null;
 			}
+			final String endPoint = waitingURL2EP.remove(url);
+			mPreIgnoreCertificateErrors.remove(url);
 			if (isOK)
 			{
 				if (responseTime == -1)
 					responseTime = System.currentTimeMillis() - time;
-				pNode.setEPUp(waitingURL2EP.get(url), true);
-				final String ep = waitingURL2EP.remove(url);
-				receivedURL2EP.put(url, ep);
-				if (ep.startsWith("https"))
+				pNode.setEPUp(endPoint, true);
+				receivedURL2EP.put(url, endPoint);
+				if (endPoint.startsWith("https"))
 				{
-					okBMASs.add(ep);
+					okBMASs.add(endPoint);
 					if (firstAnsweringBMAS == null)
-						firstAnsweringBMAS = ep;
+						firstAnsweringBMAS = endPoint;
 				}
 				else
 				{
-					okBMAs.add(ep);
+					okBMAs.add(endPoint);
 					if (firstAnsweringBMA == null)
-						firstAnsweringBMA = ep;
+						firstAnsweringBMA = endPoint;
 				}
 			}
 			else
-				pNode.setEPUp(waitingURL2EP.get(url), false);
+			{
+				pNode.addEndPointError(endPoint, mURLErrors.remove(url));
+				pNode.setEPUp(endPoint, false);
+			}
+			pNode.setEndPointCertificateError(endPoint, mCertificatesInError.remove(url));// if remove() is not successful, it is because there was no such element
 			mURLLocks.remove(url);
 //				synchronized (System.out)
 //				{
@@ -378,7 +492,7 @@ public class ExploreNodes
 	{
 		final Node root = new Node(new HashSet<>(Arrays.asList(new String[] {pRootNode})));
 		// In the meantime, get the members
-		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members");
+		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members", false);
 		for (String url : membersUrl.keySet())
 		{
 			final JSONObject jsonResult = mJSonResults.remove(url);
@@ -465,8 +579,12 @@ public class ExploreNodes
 	public static void main(String[] args) throws IOException, ParseException, InterruptedException
 	{
 		final ExploreNodes exploreNodes = new ExploreNodes();
-		if (args.length > 1)
-			exploreNodes.explore(args[0]);
+		if (args.length >= 1)
+		{
+			final String rootNode = args[0];
+			System.out.println("Exploring from " + rootNode);
+			exploreNodes.explore(rootNode);
+		}
 		else
 			exploreNodes.explore("https://g1.duniter.org:443");
 	}
@@ -511,15 +629,15 @@ public class ExploreNodes
 			Set<String> extraEndPoints = new HashSet<>(node.getEndPoints());
 			if (node.getPreferredBMAS() != null)
 			{
-				nodeInfo = node.getPreferredBMAS() + (node.getEndPointErrors().containsKey(node.getPreferredBMAS()) ? " ERR" : "*");
+				nodeInfo = formatNodeInfo(node, node.getPreferredBMAS());
 				extraEndPoints.remove(node.getPreferredBMAS());
 			}
 			if (node.getPreferredBMA() != null)
 			{
 				if (nodeInfo == null)
-					nodeInfo = node.getPreferredBMA() + (node.getEndPointErrors().containsKey(node.getPreferredBMA()) ? " ERR" : "*");
+					nodeInfo = formatNodeInfo(node, node.getPreferredBMA());
 				else
-					nodeInfo += ", " + node.getPreferredBMA() + (node.getEndPointErrors().containsKey(node.getPreferredBMA()) ? " ERR" : "*");
+					nodeInfo += ", " + formatNodeInfo(node, node.getPreferredBMA());
 				extraEndPoints.remove(node.getPreferredBMA());
 			}
 			if (nodeInfo == null)
@@ -529,7 +647,7 @@ public class ExploreNodes
 				{
 					if (!nodeInfo.isEmpty())
 						nodeInfo += ", ";
-					nodeInfo += ep + (node.getEndPointErrors().containsKey(ep) ? " ERR" : "*");
+					nodeInfo += formatNodeInfo(node, ep);
 				}
 				extraInfo = "";
 			}
@@ -540,7 +658,7 @@ public class ExploreNodes
 				{
 					if (!extraInfo.isEmpty())
 						extraInfo += ", ";
-					extraInfo += ep + (node.getEndPointErrors().containsKey(ep) ? " ERR" : "*");
+					extraInfo += formatNodeInfo(node, ep);
 				}
 			}
 
@@ -556,6 +674,15 @@ public class ExploreNodes
 			else
 				System.out.println("\t" + nodeInfo + " " + extraInfo);
 		}
+	}
+
+	private String formatNodeInfo(Node pNode, String pEndPoint)
+	{
+		String formatted = pEndPoint;
+		if (pNode.isEndPointCertificateError(pEndPoint))
+			formatted += "!";
+		formatted += (pNode.getEndPointErrors().containsKey(pEndPoint) ? " ERR" : "*");
+		return formatted;
 	}
 
 	private String normalize(String pMemberInfo, int pLength, boolean pRight)

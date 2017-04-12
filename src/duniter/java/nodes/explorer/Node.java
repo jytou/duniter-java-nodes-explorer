@@ -1,6 +1,7 @@
 package duniter.java.nodes.explorer;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Queue;
@@ -10,8 +11,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class Node
 {
-	private Map<String, AtomicLong> mEndPoints = new HashMap<>();
-	private Map<String, String> mEndPointErrors = new HashMap<>();
+	private Map<String, AtomicLong> mEndPoints = new HashMap<>();// Number of times each EP has been seen UP
+	private Map<String, AtomicLong> mEPNbSeen = new HashMap<>();// Number of times each EP has been seen
+	private Map<String, String> mEndPointErrors = new HashMap<>();// Current errors on EP. If no error, then there is no key for EP
+	private Map<String, Boolean> mEndPointCertificateError = new HashMap<>();
 	private String mPreferredBMAS = null;
 	private String mPreferredBMA = null;
 	private boolean mUp;
@@ -29,18 +32,32 @@ public class Node
 	{
 		super();
 		for (String string : pEndPoints)
+		{
 			mEndPoints.put(string, new AtomicLong(0));
+			mEPNbSeen.put(string, new AtomicLong(0));
+		}
 	}
 
 	public Set<String> getEndPoints()
 	{
-		return mEndPoints.keySet();
+		synchronized (mEndPoints)
+		{
+			return new HashSet<>(mEndPoints.keySet());
+		}
 	}
 
 	public void setEPUp(String pEP, boolean pUp)
 	{
 		if (pUp)
-			mEndPoints.get(pEP).incrementAndGet();
+		{
+			final AtomicLong ticksOk = mEndPoints.get(pEP);
+			if (ticksOk != null)
+				ticksOk.incrementAndGet();
+		}
+
+		final AtomicLong overallTicks = mEPNbSeen.get(pEP);
+		if (overallTicks != null)
+			overallTicks.incrementAndGet();
 	}
 
 	public void setPreferredBMAS(String pPreferredBMAS)
@@ -140,11 +157,47 @@ public class Node
 		}
 	}
 
+	public void removeEndPointError(String pEndPoint)
+	{
+		synchronized (mEndPointErrors)
+		{
+			mEndPointErrors.remove(pEndPoint);
+		}
+	}
+
 	public Map<String, String> getEndPointErrors()
 	{
 		synchronized (mEndPointErrors)
 		{
 			return new HashMap<>(mEndPointErrors);
+		}
+	}
+
+	public void setEndPointCertificateError(String pEndPoint, boolean pCertificateError)
+	{
+		synchronized (mEndPointCertificateError)
+		{
+			if (pCertificateError)
+				mEndPointCertificateError.put(pEndPoint, pCertificateError);
+			else
+				mEndPointCertificateError.remove(pEndPoint);
+		}
+	}
+
+	public boolean isEndPointCertificateError(String pEndPoint)
+	{
+		synchronized (mEndPointCertificateError)
+		{
+			return mEndPointCertificateError.containsKey(pEndPoint);
+		}
+	}
+
+	public void addEndPoint(String pEndPoint)
+	{
+		synchronized (mEndPoints)
+		{
+			mEndPoints.put(pEndPoint, new AtomicLong(0));
+			mEPNbSeen.put(pEndPoint, new AtomicLong(0));
 		}
 	}
 
@@ -179,5 +232,14 @@ public class Node
 	public void setMember(Member pMember)
 	{
 		mMember = pMember;
+	}
+
+	public void removeEndPoint(String pEpString)
+	{
+		synchronized (mEndPoints)
+		{
+			mEndPoints.remove(pEpString);
+			mEPNbSeen.remove(pEpString);
+		}
 	}
 }
