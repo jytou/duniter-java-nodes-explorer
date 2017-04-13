@@ -681,12 +681,20 @@ public class ExploreNodes
 		String formatted = pEndPoint;
 		if (pNode.isEndPointCertificateError(pEndPoint))
 			formatted += "!";
-		formatted += (pNode.getEndPointErrors().containsKey(pEndPoint) ? " ERR" : "*");
+		if (pNode.getEndPointErrors().containsKey(pEndPoint))
+			formatted += " ERR";
+		else
+		{
+			double stability = pNode.getEPStability(pEndPoint);
+			formatted += stability > 90 ? "*" : stability > 50 ? "+" : "-";
+		}
 		return formatted;
 	}
 
 	private String normalize(String pMemberInfo, int pLength, boolean pRight)
 	{
+		if (pMemberInfo == null)
+			pMemberInfo = "";
 		if (pMemberInfo.length() > pLength)
 			return pMemberInfo.substring(0, pLength);
 		else

@@ -60,6 +60,15 @@ public class Node
 			overallTicks.incrementAndGet();
 	}
 
+	public double getEPStability(String pEP)
+	{
+		AtomicLong total = mEPNbSeen.get(pEP);
+		if ((total != null) && (total.get() > 0))
+			return 100.0 * mEndPoints.get(pEP).get() / total.get();
+		else
+			return 0;
+	}
+
 	public void setPreferredBMAS(String pPreferredBMAS)
 	{
 		mPreferredBMAS = pPreferredBMAS;
