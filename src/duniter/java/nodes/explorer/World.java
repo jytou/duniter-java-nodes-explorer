@@ -12,6 +12,7 @@ public class World
 	private Map<String, Member> mId2Member = new HashMap<>();
 	private Map<String, Member> mPK2Member = new HashMap<>();
 	private Map<String, Block> mHash2Block = new HashMap<>();
+	private Map<String, Block> mPreviousHash2Block = new HashMap<>();
 
 	public Set<Node> getAllNodes()
 	{
@@ -37,12 +38,25 @@ public class World
 		}
 	}
 
-	public void addBlock(Block pBlock)
+	public Block getBlockFromPreviousHash(String pHash)
 	{
 		synchronized (mHash2Block)
 		{
-			mHash2Block.put(pBlock.getHash(), pBlock);
+			return mPreviousHash2Block.get(pHash);
 		}
+	}
+
+	public Block offerBlock(Block pBlock)
+	{
+		synchronized (mHash2Block)
+		{
+			if (mHash2Block.get(pBlock.getHash()) != null)
+				return mHash2Block.get(pBlock.getHash());
+			mHash2Block.put(pBlock.getHash(), pBlock);
+			if (pBlock.getPreviousHash() != null)
+				mPreviousHash2Block.put(pBlock.getPreviousHash(), pBlock);
+		}
+		return pBlock;
 	}
 
 	public Member getMember(String pPK)

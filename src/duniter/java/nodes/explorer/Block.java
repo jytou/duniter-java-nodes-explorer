@@ -10,8 +10,9 @@ public class Block
 	private String mHash;
 	private String mPreviousHash;
 	private Block mPrevious;
+	private String mInnerHash;
 
-	public Block(long pNumber, long pNonce, long pTime, long pMedianTime, Member pIssuer, String pHash, String pPreviousHash)
+	public Block(long pNumber, long pNonce, long pTime, long pMedianTime, Member pIssuer, String pInnerHash, String pHash, String pPreviousHash)
 	{
 		super();
 		mNumber = pNumber;
@@ -19,6 +20,7 @@ public class Block
 		mTime = pTime;
 		mMedianTime = pMedianTime;
 		mIssuer = pIssuer;
+		mInnerHash = pInnerHash;
 		mHash = pHash;
 		mPreviousHash = pPreviousHash;
 	}
@@ -46,5 +48,15 @@ public class Block
 	public Member getIssuer()
 	{
 		return mIssuer;
+	}
+
+	public String getPreviousHash()
+	{
+		return mPreviousHash;
+	}
+
+	public String getInnerHash()
+	{
+		return mInnerHash;
 	}
 }

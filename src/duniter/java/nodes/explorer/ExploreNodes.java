@@ -1,5 +1,15 @@
 package duniter.java.nodes.explorer;
 
+import java.awt.AWTException;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.Image;
+import java.awt.SystemTray;
+import java.awt.Toolkit;
+import java.awt.TrayIcon;
+import java.awt.TrayIcon.MessageType;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -299,31 +309,11 @@ public class ExploreNodes
 								node.addEndPointError(url, error);
 							}
 						}
-	
-						receivedURL2EP = fetchJSonResponses(node, "/blockchain/current", true);
-						for (String url : receivedURL2EP.keySet())
-						{
-							final JSONObject curblock = mJSonResults.remove(url);
-							if (curblock != null)
-							{
-								final long blockNum = (long)curblock.get("number");
-								final String hash = (String)curblock.get("inner_hash");
-								final long nonce = (long)curblock.get("nonce");
-								final long time = (long)curblock.get("time");
-								final long medianTime = (long)curblock.get("medianTime");
-								final String issuerPK = (String)curblock.get("issuer");
-								Member issuer = mWorld.getMember(issuerPK);
-								if (issuer == null)
-									issuer = new Member(issuerPK, "");
-								final String previousHash = (String)curblock.get("previousHash");
-								Block block = mWorld.getBlockFromHash(hash);
-								if (block == null)
-									mWorld.addBlock(block = new Block(blockNum, nonce, time, medianTime, issuer, hash, previousHash));
-								node.setCurrentBlock(block);
-							}
-							else
-								mURLErrors.remove(url);
-						}
+
+						// Fetch the node's current block
+						Block block = fetchBlockFromNode(-1, node);
+						if (block != null)
+							node.setCurrentBlock(block);
 
 						receivedURL2EP = fetchJSonResponses(node, endPoints, "/node/summary", true);
 						for (String url : receivedURL2EP.keySet())
@@ -488,8 +478,62 @@ public class ExploreNodes
 			new MultiConnectThread().start();
 	}
 
+	private static BufferedImage scale(Image imageToScale, int dWidth, int dHeight, Color pBackground)
+	{
+        BufferedImage scaledImage = null;
+        if (imageToScale != null)
+        {
+            scaledImage = new BufferedImage(dWidth, dHeight, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D graphics2D = scaledImage.createGraphics();
+            graphics2D.setColor(pBackground);
+            graphics2D.fillRect(0, 0, dWidth, dHeight);
+            graphics2D.drawImage(imageToScale, 0, 0, dWidth, dHeight, null);
+            graphics2D.dispose();
+        }
+        return scaledImage;
+    }
+
 	public void explore(String pRootNode) throws InterruptedException
 	{
+		TrayIcon trayIcon = null;
+		if (new File("/usr/bin/notify-send").exists())
+		{
+			trayIcon = new TrayIcon(getTrayIconImage())
+			{
+				@Override
+				public void displayMessage(String pCaption, String pText, MessageType pMessageType)
+				{
+					try
+					{
+						new ProcessBuilder(Arrays.asList(new String[] {"/usr/bin/notify-send", "-c", pCaption, pText})).start();
+					}
+					catch (IOException e1)
+					{
+						e1.printStackTrace();// should never happen
+					}
+				}
+			};
+			if (SystemTray.isSupported())
+				try
+				{
+					SystemTray.getSystemTray().add(trayIcon);
+				}
+				catch (AWTException e)
+				{
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+		}
+		else if (SystemTray.isSupported())
+			try
+			{
+				trayIcon = new TrayIcon(getTrayIconImage());
+				SystemTray.getSystemTray().add(trayIcon);
+			}
+			catch (AWTException e1)
+			{
+				e1.printStackTrace();
+			}
 		final Node root = new Node(new HashSet<>(Arrays.asList(new String[] {pRootNode})));
 		// In the meantime, get the members
 		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members", false);
@@ -518,6 +562,7 @@ public class ExploreNodes
 				System.err.println(mJSonResults.remove(url));
 		}
 		System.out.println("Number of members: " + mWorld.getAllMembers().size());
+		int currentForks = -1;
 		while (true)
 		{
 			System.out.println("Probing... (" + getReadableTime(System.currentTimeMillis()) + ")");
@@ -550,30 +595,370 @@ public class ExploreNodes
 				}
 			});
 			sortedHashes.addAll(hash2Nodes.keySet());
+			Map<String, List<Node>> hash2sortedNodes = new HashMap<>();
+			for (String hash : sortedHashes)
+			{
+				final List<Node> sortedNodes = new ArrayList<>(hash2Nodes.get(hash));
+				for (Node node : sortedNodes)
+					node.setMember(mWorld.getMember(node.getPubKey()));
+
+				sortedNodes.sort(new Comparator<Node>()
+				{
+					@Override
+					public int compare(Node pO1, Node pO2)
+					{
+						if (pO1.getMember() == null)
+							if (pO2.getMember() != null)
+								return 1;
+							else;
+						else
+							if (pO2.getMember() == null)
+								return -1;
+						final long r1 = pO1.getResponseTime();
+						final long r2 = pO2.getResponseTime();
+						if (r1 < r2)
+							return -1;
+						else if (r1 == r2)
+							return 0;
+						else
+							return 1;
+					}
+				});
+				hash2sortedNodes.put(hash, sortedNodes);
+			}
+			sortedHashes.addAll(hash2Nodes.keySet());
 			sortedHashes.remove(NO_BLOCK_KEY);
 			sortedHashes.remove(DOWN_KEY);
 			for (String hash : sortedHashes)
 			{
 				final Block block = mWorld.getBlockFromHash(hash);
-				System.out.println("Block " + hash + " - " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + "):");
-				showNodesForHash(hash2Nodes, hash, true);
+				System.out.println("Block " + block.getInnerHash() + " - " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + "):");
+				showNodesForHash(hash2sortedNodes, hash, true);
 			}
 			if (hash2Nodes.containsKey(NO_BLOCK_KEY) && (!hash2Nodes.get(NO_BLOCK_KEY).isEmpty()))
 			{
 				System.out.println("Nodes without blocks:");
-				showNodesForHash(hash2Nodes, NO_BLOCK_KEY, true);
+				showNodesForHash(hash2sortedNodes, NO_BLOCK_KEY, true);
 			}
 			if (hash2Nodes.containsKey(DOWN_KEY) && (!hash2Nodes.get(DOWN_KEY).isEmpty()))
 			{
 				System.out.println("Nodes DOWN:");
-				showNodesForHash(hash2Nodes, DOWN_KEY, false);
+				showNodesForHash(hash2sortedNodes, DOWN_KEY, false);
 			}
-//			for (Node node : mWorld.getAllNodes())
-//				System.out.println(node.getVersion() + " " + (node.getCurrentBlock() == null ? "null" : node.getCurrentBlock().getHash()) + " " + (node.isUp() ? "UP in " + (node.getResponseTime()) + "ms" : "DOWN") + " " + (node.getPreferredBMAS() != null ? node.getPreferredBMAS() : node.getPreferredBMA() != null ? node.getPreferredBMA() : node.getEndPoints().toString()) + (node.getEndPointErrors().isEmpty() ? "" : " " + node.getEndPointErrors()));
+
+			// Only the heads of all branches
+			Set<String> headsFound = new HashSet<>();
+			// associate all other hashes in this chain with the head
+			Map<String, Set<String>> head2hashes = new HashMap<>();
+			findHeads(sortedHashes, hash2sortedNodes, headsFound, head2hashes);
+
+			List<String> hashesPerHeight = new ArrayList<>(headsFound);
+			hashesPerHeight.sort(new Comparator<String>()
+			{
+				@Override
+				public int compare(String pO1, String pO2)
+				{
+					final long n1 = mWorld.getBlockFromHash(pO1).getNumber();
+					final long n2 = mWorld.getBlockFromHash(pO2).getNumber();
+					if (n1 == n2)
+					{
+						// Compare with the number of members in each
+						int mem1 = 0;
+						for (Node node : hash2Nodes.get(pO1))
+							if (node.getMember() != null)
+								mem1++;
+						int mem2 = 0;
+						for (Node node : hash2Nodes.get(pO2))
+								if (node.getMember() != null)
+									mem2++;
+						return -Integer.valueOf(mem1).compareTo(mem2);
+					}
+					return -Long.valueOf(n1).compareTo(n2);
+				}
+			});
+			long highestBlockNumber = mWorld.getBlockFromHash(hashesPerHeight.get(0)).getNumber();
+			String mainHash = hashesPerHeight.get(0);
+			String extra = null;
+			System.out.println("Found the following heads:");
+			int totalMembers = 0;
+			int allLateMembers = 0;
+			int allForkedMembers = 0;
+			int totalMirrors = 0;
+			int allLateMirrors = 0;
+			int allForkedMirrors = 0;
+			int newNbForks = 0;
+			for (String head : hashesPerHeight)
+			{
+				int nbMembers = 0;
+				int nbMirrors = 0;
+				int lateMembers = 0;
+				int lateMirrors = 0;
+				if (extra != null)
+					newNbForks++;
+				for (String associatedHash : head2hashes.get(head))
+					for (Node node : hash2Nodes.get(associatedHash))
+					{
+						if (!associatedHash.equals(head))
+							// This is a late node
+							if (node.getMember() == null)
+							{
+								if (extra == null)
+									allLateMirrors++;
+								else
+									allForkedMirrors++;
+								lateMirrors++;
+								totalMirrors++;
+							}
+							else
+							{
+								if (extra == null)
+								// MAIN
+									allLateMembers++;
+								else
+								// FORK
+									allForkedMembers++;
+								lateMembers++;
+								totalMembers++;
+							}
+						else
+							// This is a node on the head of this branch
+							if (node.getMember() == null)
+							{
+								nbMirrors++;
+								totalMirrors++;
+								if (extra != null)
+									allForkedMirrors++;
+							}
+							else
+							{
+								if (extra != null)
+								// MAIN
+									allForkedMembers++;
+								totalMembers++;
+								nbMembers++;
+							}
+					}
+				String extra2 = "";
+				if (extra == null)
+					extra = "MAIN";
+				else if (mWorld.getBlockFromHash(head).getNumber() < highestBlockNumber - 20)
+					extra = "ASTRAY";
+				else
+				{
+					// Find the fork point
+					Block mainBlock = mWorld.getBlockFromHash(mainHash);
+					Block overMainBlock = mainBlock;
+					Block forkBlock = mWorld.getBlockFromHash(head);
+					Block overForkBlock = forkBlock;
+					do
+					{
+						if (forkBlock.getNumber() >= mainBlock.getNumber())
+						{
+							overForkBlock = forkBlock;
+							// Try to get the block from memory
+							forkBlock = fetchPreviousBlock(forkBlock, head, hash2sortedNodes);
+							if (forkBlock == null)
+								break;
+						}
+						if (forkBlock.getNumber() < mainBlock.getNumber())
+						{
+							// We also need to go to the previous block on main
+							// Try to get the block from memory
+							overMainBlock = mainBlock;
+							mainBlock = fetchPreviousBlock(mainBlock, mainHash, hash2sortedNodes);
+							if (mainBlock == null)
+								break;
+						}
+//						System.out.println("Block main " + mainBlock.getNumber() + " - " + mainBlock.getInnerHash() + " fork " + forkBlock.getNumber() + " - " + forkBlock.getInnerHash());
+					}
+					while (mainBlock != forkBlock);
+					extra = "FORK";
+					if (mainBlock == forkBlock)
+						extra2 = "\n\tforked at block " + mainBlock.getNumber() + " at " + getReadableTime(mainBlock.getTime() * 1000) + "\n\tinto block " + overMainBlock.getInnerHash() + " at " + getReadableTime(overMainBlock.getTime() * 1000) + " (MAIN)\n\t and block " + overForkBlock.getInnerHash() + " at " + getReadableTime(overForkBlock.getTime() * 1000) + " (FORK)";
+					else
+						extra2 = "\n\t(could not retrieve forking info)";
+				}
+				if (nbMembers > 0)
+					extra += ", " + nbMembers + " members";
+				if (nbMirrors > 0)
+					extra += ", " + nbMirrors + " mirrors";
+				if (lateMembers > 0)
+					extra += ", " + lateMembers + " LATE members";
+				if (lateMirrors > 0)
+					extra += ", " + lateMirrors + " LATE mirrors";
+				String message = "Hash " + mWorld.getBlockFromHash(head).getInnerHash() + " " + extra + extra2;
+				System.out.println(message);
+			}
+
+			// Compute overall network stability
+			Color trayColor = Color.DARK_GRAY;
+			if (totalMembers > 0)
+			{
+				// Consider that a forked member is counting double
+				double forkStability = Math.max(0.0, 100.0 - 100.0 * ((1.0 * (allForkedMembers * 2 + allForkedMirrors)) / (totalMembers + totalMirrors)));
+				// Late nodes, a mirror node counts half
+				double lateStability = (totalMembers + totalMirrors - allForkedMembers - allForkedMirrors == 0) ? 0 : 100.0 - (100.0 * (allLateMembers + allLateMirrors / 2)) / (totalMembers + totalMirrors - allForkedMembers - allForkedMirrors);
+				double overallStability = forkStability * lateStability / 100;
+				System.out.println("Stability of network: fork: " + forkStability + ", late: " + lateStability + ", overall: " + overallStability);
+				double redComponent = Math.min(255, (100 - overallStability) * 4);
+				double greenComponent = overallStability * 1.8;
+				trayColor = new Color((int)redComponent, (int)greenComponent, 0);
+			}
+			else
+			{
+				System.out.println("No members???");
+				trayColor = Color.red;
+			}
+			if (trayIcon != null)
+			{
+				trayIcon.setImage(scale(getTrayIconImage(), 24, 24, trayColor));
+				if (currentForks == -1)
+					currentForks = newNbForks;
+				else if (newNbForks > currentForks)
+					trayIcon.displayMessage("NEW FORK", "Duniter network FORKED!", MessageType.WARNING);
+			}
 			System.out.println("--------------------------------------------------------------------------------------------------------------------------------------------------------------------");
-			Thread.sleep(60000);
+			Thread.sleep(30000);
 			mNodesFound.clear();
 		}
+	}
+
+	private void findHeads(final SortedSet<String> pSortedHashes, Map<String, List<Node>> pHash2sortedNodes, Set<String> pHeadsFound, Map<String, Set<String>> pHead2hashes)
+	{
+		for (String hash : pSortedHashes)
+		{
+			boolean foundOtherHead = false;
+			Block searchingBlock = mWorld.getBlockFromHash(hash);
+			for (String head : pHeadsFound)
+			{
+				Block existingBlock = mWorld.getBlockFromHash(head);
+				Block highest;
+				Block lowest;
+				if (existingBlock.getNumber() > searchingBlock.getNumber())
+				{
+					highest = existingBlock;
+					lowest = searchingBlock;
+				}
+				else if (existingBlock.getNumber() < searchingBlock.getNumber())
+				{
+					highest = searchingBlock;
+					lowest = existingBlock;
+				}
+				else // 2 blocks with the same number and different hashes cannot be ok
+					continue;
+				if (highest.getNumber() > lowest.getNumber() + 50)
+				// do not fetch info for blocks that are too far apart and consider them as 2 different branches
+					continue;
+				Block current = highest;
+				do
+				{
+					// Try to get the block from memory
+					current = fetchPreviousBlock(current, head, pHash2sortedNodes);
+					if (current == null)
+					// Yikes, we couldn't find that block, too bad, just let's ignore that info
+						break;
+				}
+				while (current.getNumber() > lowest.getNumber());
+				if (current == lowest)
+				{
+					// We have managed to find the exact lowest block from the highest, this is on the same branch, keep only the highest
+					pHeadsFound.remove(lowest.getHash());
+					pHeadsFound.add(highest.getHash());
+					Set<String> associatedHashes = pHead2hashes.get(highest.getHash());
+					if (associatedHashes == null)
+						pHead2hashes.put(highest.getHash(), associatedHashes = new HashSet<>());
+					associatedHashes.add(lowest.getHash());
+					associatedHashes.add(highest.getHash());
+					if (pHead2hashes.containsKey(lowest.getHash()))
+					// We need to add all these to the new head
+						associatedHashes.addAll(pHead2hashes.remove(lowest.getHash()));
+					foundOtherHead = true;
+					break;
+				}
+			}
+			if (!foundOtherHead)
+			{
+				pHeadsFound.add(hash);
+				Set<String> hashes = new HashSet<>();
+				hashes.add(hash);
+				pHead2hashes.put(hash, hashes);
+			}
+		}
+	}
+
+	private Block fetchPreviousBlock(Block pBlock, String pHeadHash, Map<String, List<Node>> pHash2Nodes)
+	{
+		Block previousMain = mWorld.getBlockFromHash(pBlock.getPreviousHash());
+		if (previousMain == null)
+		{
+			// No block found, fetch from peers
+			previousMain = fetchBlock(pBlock.getPreviousHash(), pBlock.getNumber() - 1, pHash2Nodes.get(pHeadHash));
+			if (previousMain != null)
+			// Add it in memory
+				previousMain = mWorld.offerBlock(previousMain);
+			else
+			// Yikes, we couldn't find that block, too bad, just let's ignore that info
+				return null;
+
+		}
+		return previousMain;
+	}
+
+	public Block fetchBlockFromNode(long pNumber, Node pNode)
+	{
+		Map<String, String> receivedURL2EP;
+		try
+		{
+			receivedURL2EP = fetchJSonResponses(pNode, pNumber == -1 ? "/blockchain/current" : "/blockchain/block/" + pNumber, true);
+		}
+		catch (InterruptedException e)
+		{
+			return null;// should never happen
+		}
+		for (String url : receivedURL2EP.keySet())
+		{
+			final JSONObject curblock = mJSonResults.remove(url);
+			if (curblock != null)
+			{
+				final String hash = (String)curblock.get("hash");
+				Block block = mWorld.getBlockFromHash(hash);
+				if (block != null)
+					return block;
+				final long blockNum = (long)curblock.get("number");
+				final String innerhash = (String)curblock.get("inner_hash");
+				final long nonce = (long)curblock.get("nonce");
+				final long time = (long)curblock.get("time");
+				final long medianTime = (long)curblock.get("medianTime");
+				final String issuerPK = (String)curblock.get("issuer");
+				Member issuer = mWorld.getMember(issuerPK);
+				if (issuer == null)
+					issuer = new Member(issuerPK, "");
+				final String previousHash = (String)curblock.get("previousHash");
+				block = mWorld.offerBlock(new Block(blockNum, nonce, time, medianTime, issuer, innerhash, hash, previousHash));
+				return block;
+			}
+			else
+				mURLErrors.remove(url);
+		}
+		return null;
+	}
+
+	private Block fetchBlock(String pHash, long pNumber, List<Node> pNodes)
+	{
+		for (Node node : pNodes)
+		{
+			Block found = fetchBlockFromNode(pNumber, node);
+			if ((found != null) && found.getHash().equals(pHash))
+			// Great, we found the node with the correct hash, return it
+				return found;
+			// else whoops, this is another hash, maybe that node is not on the same chain anymore, just go on with the search
+		}
+		return null;
+	}
+
+	private Image getTrayIconImage()
+	{
+		return Toolkit.getDefaultToolkit().getImage(getClass().getResource("duniter-logo24.png"));
 	}
 
 	public static void main(String[] args) throws IOException, ParseException, InterruptedException
@@ -596,33 +981,7 @@ public class ExploreNodes
 
 	private void showNodesForHash(Map<String, List<Node>> pHash2Nodes, String pHash, final boolean pShowNodeInfos)
 	{
-		final List<Node> sortedNodes = new ArrayList<>(pHash2Nodes.get(pHash));
-		for (Node node : sortedNodes)
-			node.setMember(mWorld.getMember(node.getPubKey()));
-
-		sortedNodes.sort(new Comparator<Node>()
-		{
-			@Override
-			public int compare(Node pO1, Node pO2)
-			{
-				if (pO1.getMember() == null)
-					if (pO2.getMember() != null)
-						return 1;
-					else;
-				else
-					if (pO2.getMember() == null)
-						return -1;
-				final long r1 = pO1.getResponseTime();
-				final long r2 = pO2.getResponseTime();
-				if (r1 < r2)
-					return -1;
-				else if (r1 == r2)
-					return 0;
-				else
-					return 1;
-			}
-		});
-		for (Node node : sortedNodes)
+		for (Node node : pHash2Nodes.get(pHash))
 		{
 			String nodeInfo = null;
 			String extraInfo;
