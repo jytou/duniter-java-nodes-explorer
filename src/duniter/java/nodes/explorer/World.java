@@ -7,26 +7,18 @@ import java.util.Set;
 
 public class World
 {
-	private Map<String, Node> mEP2Node = new HashMap<>();// One endpoint to its node
+	private Map<String, EP> mEPs = new HashMap<>();// All endpoints
 //	private Map<Node, Set<String>> mNode2EPs = new HashMap<>();// Node to its currently known endpoints
 	private Map<String, Member> mId2Member = new HashMap<>();
 	private Map<String, Member> mPK2Member = new HashMap<>();
 	private Map<String, Block> mHash2Block = new HashMap<>();
 	private Map<String, Block> mPreviousHash2Block = new HashMap<>();
 
-	public Set<Node> getAllNodes()
+	public Set<EP> getAllEndPoints()
 	{
-		synchronized (mEP2Node)
+		synchronized (mEPs)
 		{
-			return new HashSet<Node>(mEP2Node.values());
-		}
-	}
-
-	public Node getNodeForEP(String pEp)
-	{
-		synchronized (mEP2Node)
-		{
-			return mEP2Node.get(pEp);
+			return new HashSet<EP>(mEPs.values());
 		}
 	}
 
@@ -84,21 +76,34 @@ public class World
 		}
 	}
 
-	public void addEndPoint(String pEpString, Node pNode)
+	public EP offerEndPoint(String pEP)
 	{
-		synchronized (mEP2Node)
+		synchronized (mEPs)
 		{
-			mEP2Node.put(pEpString, pNode);
+			if (mEPs.containsKey(pEP))
+				return mEPs.get(pEP);
+			else
+			{
+				final EP ep = new EP(pEP);
+				mEPs.put(pEP, ep);
+				return ep;
+			}
 		}
-		pNode.addEndPoint(pEpString);
 	}
 
-	public void removeEndPoint(String pEpString, Node pNode)
+	public EP getEndPoint(String pEP)
 	{
-		synchronized (mEP2Node)
+		synchronized (mEPs)
 		{
-			mEP2Node.remove(pEpString, pNode);
+			return mEPs.get(pEP);
 		}
-		pNode.removeEndPoint(pEpString);
+	}
+
+	public void removeEndPoint(String pEP)
+	{
+		synchronized (mEPs)
+		{
+			mEPs.remove(pEP);
+		}
 	}
 }

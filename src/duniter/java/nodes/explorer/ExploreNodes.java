@@ -13,6 +13,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.management.ManagementFactory;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
@@ -28,7 +29,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.SortedSet;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -54,8 +57,8 @@ public class ExploreNodes
 	private static final String DOWN_KEY = "DOWN";
 	private static final String NO_BLOCK_KEY = "NO BLOCK";
 	private World mWorld;
-	private Set<Node> mNodesFound = new HashSet<>();
-	private BlockingQueue<Node> mNodes2Explore = new LinkedBlockingQueue<>();
+	private Set<String> mEPsFound = new HashSet<>();
+	private BlockingQueue<String> mEPs2Explore = new LinkedBlockingQueue<>();
 	private AtomicInteger mNbActive = new AtomicInteger(0);
 	private Semaphore mFinished = new Semaphore(0);
 
@@ -203,16 +206,9 @@ public class ExploreNodes
 			{
 				try
 				{
-					final Node node = mNodes2Explore.take();
-					synchronized (mNodesFound)
-					{
-						mNodesFound.add(node);
-					}
-					final Set<String> endPoints = node.getEndPoints();
-//					System.out.println("Exploring " + endPoints.toString() + "... (" + mNodes2Explore.size() + " to go)");
+					final EP ep = mWorld.getEndPoint(mEPs2Explore.take());
 
-					Map<String, String> receivedURL2EP = fetchJSonResponses(node, "/network/peering", false);
-					final Set<String> existingEndPoints = new HashSet<>(node.getEndPoints());
+					Map<String, String> receivedURL2EP = fetchJSonResponses(ep, "/network/peering", false);
 					final Set<String> foundEndPoints = new HashSet<>();
 					for (String url : receivedURL2EP.keySet())
 					{
@@ -220,120 +216,95 @@ public class ExploreNodes
 						if (peeringInfo != null)
 						{
 							final String pubkey = (String)peeringInfo.get("pubkey");
-							node.setPubKey(pubkey);
+							ep.setPubKey(pubkey);
 							final JSONArray raweps = (JSONArray)peeringInfo.get("endpoints");
 							for (Object epObject : raweps)
 							{
 								final String epString = (String)epObject;
-								final Set<String> eps = getEPStringsFromRawString(epString);
-								for (String ep : eps)
-								{
-									foundEndPoints.add(ep);
-									if (!existingEndPoints.contains(ep))
-										mWorld.addEndPoint(ep, node);
-								}
+								final Set<String> epURLs = getEPStringsFromRawString(epString);
+								for (String epURL : epURLs)
+									foundEndPoints.add(epURL);
 							}
-							node.setEPUp(receivedURL2EP.get(url), true);
+							ep.setUp(true);
 						}
 						else
 						{
-							node.addEndPointError(receivedURL2EP.get(url), mURLErrors.remove(url));
-							node.setEPUp(receivedURL2EP.get(url), false);
+							ep.setError(mURLErrors.remove(url));
+							ep.setUp(false);
 						}
 					}
-					if (!receivedURL2EP.isEmpty())
-					{
-						existingEndPoints.removeAll(foundEndPoints);
-						for (String goneEP : existingEndPoints)
-							mWorld.removeEndPoint(goneEP, node);
-					}
-					node.setUp(!receivedURL2EP.isEmpty());
+					if (!foundEndPoints.isEmpty())
+						ep.setSiblings(foundEndPoints);
 
-					if (!receivedURL2EP.isEmpty())
+					if (ep.isUp())
 					{
-						// for nodes that are UP, let's fetch some more info
-						receivedURL2EP = fetchJSonResponses(node, "/network/peers", true);
+						// for EPs that are UP, let's fetch some more info
+						receivedURL2EP = fetchJSonResponses(ep, "/network/peers", true);
 						for (String url : receivedURL2EP.keySet())
 						{
 							final JSONObject peersResult = mJSonResults.remove(url);
 							if (peersResult != null)
 							{
 								final JSONArray peersArray = (JSONArray)peersResult.get("peers");
+								final Set<String> peers = new HashSet<>();
 								for (Object peerObject : peersArray)
 								{
 									final JSONObject jsonPeer = (JSONObject)peerObject;
 									final JSONArray enpointsArray = (JSONArray)jsonPeer.get("endpoints");
-									final Set<String> peers = new HashSet<>();
-									Node otherNode = null;
 									for (Object endpointObject : enpointsArray)
 									{
 										final String endpointString = (String)endpointObject;
 										final Set<String> peersfound = getEPStringsFromRawString(endpointString);
 										peers.addAll(peersfound);
-										if (otherNode == null)
-											for (String peerep : peersfound)
-												if (otherNode == null)
-													otherNode = mWorld.getNodeForEP(peerep);
-									}
-									if (otherNode == null)
-									{
-										otherNode = new Node(peers);
-										for (String peer : peers)
-											mWorld.addEndPoint(peer, otherNode);
-									}
-									else
-									{
-										Set<String> oldPeers = otherNode.getEndPoints();
-										Set<String> newPeers = new HashSet<>(peers);
-										newPeers.removeAll(oldPeers);
-										for (String peer : newPeers)
-											mWorld.addEndPoint(peer, otherNode);
-									}
-									synchronized (mNodesFound)
-									{
-										if (!mNodesFound.contains(otherNode))
-										{
-											mNodes2Explore.offer(otherNode);
-											mNodesFound.add(otherNode);
-											mNbActive.incrementAndGet();
-	//										System.out.println("Need to explore " + otherNode.getEndPoints().toString());
-										}
+										for (String peer : peersfound)
+											offerEP2Query(peer);
 									}
 								}
+								ep.setKnownPeers(peers);
 								break;
 							}
 							else
-							{
-								// Can not reach that node, pick the error
-								String error = mURLErrors.remove(url);
-								node.addEndPointError(url, error);
-							}
+							// Can not reach that EP, pick the error
+								ep.setError(mURLErrors.remove(url));
 						}
 
-						// Fetch the node's current block
-						Block block = fetchBlockFromNode(-1, node);
+						// Fetch the EP's current block
+						Block block = fetchBlockFromEP(-1, ep);
 						if (block != null)
-							node.setCurrentBlock(block);
+							ep.setCurrentBlock(block);
 
-						receivedURL2EP = fetchJSonResponses(node, endPoints, "/node/summary", true);
+						receivedURL2EP = fetchJSonResponses(ep, "/node/summary", true);
 						for (String url : receivedURL2EP.keySet())
 						{
 							final JSONObject info = mJSonResults.remove(url);
 							if (info != null)
 							{
 								final JSONObject duniter = (JSONObject)info.get("duniter");
-								if (node.getVersion() == null)
-									node.setVersion((String)duniter.get("version"));
+								if (ep.getVersion() == null)
+									ep.setVersion((String)duniter.get("version"));
 							}
 							else
-								node.addEndPointError(receivedURL2EP.get(url), mURLErrors.remove(url));
+								ep.setError(mURLErrors.remove(url));
+						}
+						receivedURL2EP = fetchJSonResponses(ep, "/node/sandboxes", true);
+						for (String url : receivedURL2EP.keySet())
+						{
+							final JSONObject info = mJSonResults.remove(url);
+							if (info != null)
+							{
+								final int id = ((Long)((JSONObject)info.get("identities")).get("free")).intValue();
+								final int mem = ((Long)((JSONObject)info.get("memberships")).get("free")).intValue();
+								final int trans = ((Long)((JSONObject)info.get("transactions")).get("free")).intValue();
+								ep.setFreeIdentities(id);
+								ep.setFreeMemberships(mem);
+								ep.setFreeTransactions(trans);
+							}
 						}
 					}
 
-					node.incTicks();
 					mNbActive.decrementAndGet();
-					if ((mNbActive.get() == 0) && (mNodes2Explore.isEmpty()))
-					// Nobody is active AND there is nothing left in all nodes to explore
+					if ((mNbActive.get() == 0) && (mEPs2Explore.isEmpty()))
+					// Nobody is active AND there is nothing left in all EPs to explore
 						mFinished.release();
 				}
 				catch (InterruptedException e)
@@ -343,48 +314,37 @@ public class ExploreNodes
 			}
 		}
 
-		private Set<String> getEPStringsFromRawString(final String endpointString)
-		{
-			final String[] endpointElements = endpointString.split(" ");
-			final String header = endpointElements[0].equals("BMAS") ? "https://" : "http://";
-			final String port = endpointElements[endpointElements.length - 1];
-			final Set<String> peersfound = new HashSet<>();
-			for (int i = 1; i < endpointElements.length - 1; i++)
-				peersfound.add(header + endpointElements[i] + ":" + port);
-			return peersfound;
-		}
 	}
 
-	private Map<String, String> fetchJSonResponses(final Node pNode, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
+	private static Set<String> getEPStringsFromRawString(final String endpointString)
 	{
-		Map<String, String> receivedURL2EP = new HashMap<>();
-		if (pNode.getPreferredBMAS() != null)
-			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMAS()})), pSuffix, pPreIgnoreCertificatesInError);
-		if (receivedURL2EP.isEmpty() || (pNode.getPreferredBMA() != null))
-			receivedURL2EP = fetchJSonResponses(pNode, new HashSet<>(Arrays.asList(new String[] {pNode.getPreferredBMA()})), pSuffix, pPreIgnoreCertificatesInError);
-		if (receivedURL2EP.isEmpty())
-			receivedURL2EP = fetchJSonResponses(pNode, pNode.getEndPoints(), pSuffix, pPreIgnoreCertificatesInError);
-		return receivedURL2EP;
+		final String[] endpointElements = endpointString.split(" ");
+		final String header = endpointElements[0].equals("BMAS") ? "https://" : "http://";
+		final String port = endpointElements[endpointElements.length - 1];
+		final Set<String> peersfound = new HashSet<>();
+		for (int i = 1; i < endpointElements.length - 1; i++)
+			peersfound.add(header + endpointElements[i] + ":" + port);
+		return peersfound;
 	}
 
-	private Map<String, String> fetchJSonResponses(final Node pNode, final Set<String> pEndPoints, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
+	private Map<String, String> fetchJSonResponses(final EP pEndPoint, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
 	{
 		final BlockingQueue<String> receivingQueue = new LinkedBlockingQueue<>();
 		final Map<String, String> waitingURL2EP = new HashMap<>();
-		for (String ep : pEndPoints)
+		String ep = pEndPoint.getURL();
+		String url = ep + pSuffix;
+
+		waitingURL2EP.put(url, ep);
+		mURLErrors.remove(url);
+		mURLLocks.put(url, receivingQueue);
+		if (pEndPoint.isCertificateError())
 		{
-			final String url = ep + pSuffix;
-			waitingURL2EP.put(url, ep);
-			mURLErrors.remove(url);
-			mURLLocks.put(url, receivingQueue);
-			if (pNode.isEndPointCertificateError(ep))
-			{
-				mCertificatesInError.add(url);
-				if (pPreIgnoreCertificatesInError)
-					mPreIgnoreCertificateErrors.add(url);
-			}
-			mURLs.offer(url);
+			mCertificatesInError.add(url);
+			if (pPreIgnoreCertificatesInError)
+				mPreIgnoreCertificateErrors.add(url);
 		}
+		mURLs.offer(url);
+
 		long time = System.currentTimeMillis();
 		final Map<String, String> receivedURL2EP = new HashMap<>();
 		final Set<String> okBMASs = new HashSet<>();
@@ -392,47 +352,39 @@ public class ExploreNodes
 		final Set<String> okBMAs = new HashSet<>();
 		String firstAnsweringBMA = null;
 		long responseTime = -1;
-		for (int iEP = 0; iEP < pEndPoints.size(); iEP++)
-		{
+//		for (int iEP = 0; iEP < pEndPoints.size(); iEP++)
+//		{
 			final long time2wait = 10000 - (System.currentTimeMillis() - time);
-			final String url = time2wait > 0 ? receivingQueue.poll(time2wait, TimeUnit.MILLISECONDS) : null;
+			url = time2wait > 0 ? receivingQueue.poll(time2wait, TimeUnit.MILLISECONDS) : null;
 			if (url == null)
 			{
 				// We have waited too long anyway, finish all
 				while (!waitingURL2EP.isEmpty())
 				{
 					final String retrievedURL = waitingURL2EP.keySet().iterator().next();
-//						synchronized (System.out)
-//						{
-//							System.out.println("TIMEOUT " + retrievedURL);
-//						}
 					final MultiConnectThread connectThread = mBusyConnectThreads.remove(retrievedURL);
 					if (connectThread != null)
 					{
 						connectThread.interrupt();
 						new MultiConnectThread().start();
 					}
-					String ep = waitingURL2EP.remove(retrievedURL);
+					waitingURL2EP.remove(retrievedURL);
 					mPreIgnoreCertificateErrors.remove(retrievedURL);
 					mCertificatesInError.remove(retrievedURL);
-					pNode.setEPUp(ep, false);
+					pEndPoint.setUp(false);
 					mJSonResults.remove(retrievedURL);
-					pNode.addEndPointError(ep, mURLErrors.remove(retrievedURL));
+					pEndPoint.setError(mURLErrors.remove(retrievedURL));
 				}
-				break;
+				return receivedURL2EP;
 			}
-			boolean isOK;
-			synchronized (mJSonResults)
-			{
-				isOK = mJSonResults.get(url) != null;
-			}
+			boolean isOK = mJSonResults.get(url) != null;
 			final String endPoint = waitingURL2EP.remove(url);
 			mPreIgnoreCertificateErrors.remove(url);
 			if (isOK)
 			{
 				if (responseTime == -1)
 					responseTime = System.currentTimeMillis() - time;
-				pNode.setEPUp(endPoint, true);
+				pEndPoint.setUp(true);
 				receivedURL2EP.put(url, endPoint);
 				if (endPoint.startsWith("https"))
 				{
@@ -449,22 +401,14 @@ public class ExploreNodes
 			}
 			else
 			{
-				pNode.addEndPointError(endPoint, mURLErrors.remove(url));
-				pNode.setEPUp(endPoint, false);
+				pEndPoint.setError(mURLErrors.remove(url));
+				pEndPoint.setUp(false);
 			}
-			pNode.setEndPointCertificateError(endPoint, mCertificatesInError.remove(url));// if remove() is not successful, it is because there was no such element
+			pEndPoint.setCertificateError(mCertificatesInError.remove(url));// if remove() is not successful, it is because there was no such element
 			mURLLocks.remove(url);
-//				synchronized (System.out)
-//				{
-//					System.out.println((isOK ? "UP " : "DOWN ") + url);
-//				}
-		}
-		if ((firstAnsweringBMAS != null) && ((pNode.getPreferredBMAS() == null) || (!okBMASs.contains(pNode.getPreferredBMAS()))))
-			pNode.setPreferredBMAS(firstAnsweringBMAS);
-		if ((firstAnsweringBMA != null) && ((pNode.getPreferredBMA() == null) || (!okBMAs.contains(pNode.getPreferredBMA()))))
-			pNode.setPreferredBMA(firstAnsweringBMA);
+//		}
 		if (responseTime != -1)
-			pNode.addResponseTime(responseTime);
+			pEndPoint.addResponseTime(responseTime);
 		return receivedURL2EP;
 	}
 
@@ -472,10 +416,18 @@ public class ExploreNodes
 	{
 		super();
 		mWorld = new World();
-		for (int i = 0; i < 20; i++)
+		for (int i = 0; i < 50; i++)
+		{
+			System.out.print(".");
 			new NodeAnalyzer().start();
-		for (int i = 0; i < 60; i++)
+		}
+		System.out.println();
+		for (int i = 0; i < 100; i++)
+		{
+			System.out.print(".");
 			new MultiConnectThread().start();
+		}
+		System.out.println();
 	}
 
 	private static BufferedImage scale(Image imageToScale, int dWidth, int dHeight, Color pBackground)
@@ -493,7 +445,20 @@ public class ExploreNodes
         return scaledImage;
     }
 
-	public void explore(String pRootNode) throws InterruptedException
+	public void offerEP2Query(String pEP)
+	{
+		synchronized (mEPsFound)
+		{
+			if (mEPsFound.contains(pEP))
+				return;
+			mEPsFound.add(pEP);
+			mNbActive.incrementAndGet();
+			mWorld.offerEndPoint(pEP);
+			mEPs2Explore.offer(pEP);
+		}
+	}
+
+	public void explore(String pRootEP) throws InterruptedException
 	{
 		TrayIcon trayIcon = null;
 		if (new File("/usr/bin/notify-send").exists())
@@ -520,7 +485,6 @@ public class ExploreNodes
 				}
 				catch (AWTException e)
 				{
-					// TODO Auto-generated catch block
 					e.printStackTrace();
 				}
 		}
@@ -534,8 +498,8 @@ public class ExploreNodes
 			{
 				e1.printStackTrace();
 			}
-		final Node root = new Node(new HashSet<>(Arrays.asList(new String[] {pRootNode})));
 		// In the meantime, get the members
+		final EP root = mWorld.offerEndPoint(pRootEP);
 		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members", false);
 		for (String url : membersUrl.keySet())
 		{
@@ -563,29 +527,32 @@ public class ExploreNodes
 		}
 		System.out.println("Number of members: " + mWorld.getAllMembers().size());
 		int currentForks = -1;
+		mEPsFound.add(pRootEP);
 		while (true)
 		{
 			System.out.println("Probing... (" + getReadableTime(System.currentTimeMillis()) + ")");
-			mNodes2Explore.offer(root);
-			mNbActive.set(1);
+			Set<String> toOffer = new HashSet<>(mEPsFound);
+			mEPsFound.clear();
+			for (String ep2offer : toOffer)
+				offerEP2Query(ep2offer);
 			mFinished.acquire();
 			System.out.println("Status as of " + getReadableTime(System.currentTimeMillis()) + ":");
-			final Map<String, List<Node>> hash2Nodes = new HashMap<>();
-			for (Node node : mWorld.getAllNodes())
+			final Map<String, List<EP>> hash2EPs = new HashMap<>();
+			for (EP ep : mWorld.getAllEndPoints())
 			{
-				final String hash = node.isUp() ? (node.getCurrentBlock() == null ? NO_BLOCK_KEY : node.getCurrentBlock().getHash()) : DOWN_KEY;
-				List<Node> list = hash2Nodes.get(hash);
+				final String hash = ep.isUp() ? (ep.getCurrentBlock() == null ? NO_BLOCK_KEY : ep.getCurrentBlock().getHash()) : DOWN_KEY;
+				List<EP> list = hash2EPs.get(hash);
 				if (list == null)
-					hash2Nodes.put(hash, list = new ArrayList<>());
-				list.add(node);
+					hash2EPs.put(hash, list = new ArrayList<>());
+				list.add(ep);
 			}
 			final SortedSet<String> sortedHashes = new TreeSet<>(new Comparator<String>()
 			{
 				@Override
 				public int compare(String pO1, String pO2)
 				{
-					final int s1 = hash2Nodes.containsKey(pO1) ? hash2Nodes.get(pO1).size() : 0;
-					final int s2 = hash2Nodes.containsKey(pO2) ? hash2Nodes.get(pO2).size() : 0;
+					final int s1 = hash2EPs.containsKey(pO1) ? hash2EPs.get(pO1).size() : 0;
+					final int s2 = hash2EPs.containsKey(pO2) ? hash2EPs.get(pO2).size() : 0;
 					if (s2 < s1)
 						return -1;
 					else if (s2 == s1)
@@ -594,18 +561,18 @@ public class ExploreNodes
 						return 1;
 				}
 			});
-			sortedHashes.addAll(hash2Nodes.keySet());
-			Map<String, List<Node>> hash2sortedNodes = new HashMap<>();
+			sortedHashes.addAll(hash2EPs.keySet());
+			Map<String, List<EP>> hash2sortedEPs = new HashMap<>();
 			for (String hash : sortedHashes)
 			{
-				final List<Node> sortedNodes = new ArrayList<>(hash2Nodes.get(hash));
-				for (Node node : sortedNodes)
-					node.setMember(mWorld.getMember(node.getPubKey()));
+				final List<EP> sortedEPs = new ArrayList<>(hash2EPs.get(hash));
+				for (EP ep : sortedEPs)
+					ep.setMember(mWorld.getMember(ep.getPubKey()));
 
-				sortedNodes.sort(new Comparator<Node>()
+				sortedEPs.sort(new Comparator<EP>()
 				{
 					@Override
-					public int compare(Node pO1, Node pO2)
+					public int compare(EP pO1, EP pO2)
 					{
 						if (pO1.getMember() == null)
 							if (pO2.getMember() != null)
@@ -614,8 +581,8 @@ public class ExploreNodes
 						else
 							if (pO2.getMember() == null)
 								return -1;
-						final long r1 = pO1.getResponseTime();
-						final long r2 = pO2.getResponseTime();
+						final long r1 = pO1.getAvgResponseTime();
+						final long r2 = pO2.getAvgResponseTime();
 						if (r1 < r2)
 							return -1;
 						else if (r1 == r2)
@@ -624,33 +591,60 @@ public class ExploreNodes
 							return 1;
 					}
 				});
-				hash2sortedNodes.put(hash, sortedNodes);
+				hash2sortedEPs.put(hash, sortedEPs);
 			}
-			sortedHashes.addAll(hash2Nodes.keySet());
-			sortedHashes.remove(NO_BLOCK_KEY);
+			sortedHashes.addAll(hash2EPs.keySet());
 			sortedHashes.remove(DOWN_KEY);
+
+			Map<String, SortedMap<Node, Node>> hash2Nodes = new HashMap<>();
+			for (String hash : sortedHashes)
+			{
+				SortedMap<Node, Node> nodes = new TreeMap<>();
+				hash2Nodes.put(hash, nodes);
+				for (EP ep : hash2sortedEPs.get(hash))
+				{
+					Node node = new Node(ep);
+					if (nodes.containsKey(node))
+						nodes.get(node).addEP(ep);
+					else
+						nodes.put(node, node);
+				}
+			}
 			for (String hash : sortedHashes)
 			{
 				final Block block = mWorld.getBlockFromHash(hash);
-				System.out.println("Block " + block.getInnerHash() + " - " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + "):");
-				showNodesForHash(hash2sortedNodes, hash, true);
+				System.out.println("Block " + block.getInnerHash() + " - Num " + block.getNumber() + " (" + getReadableTime(block.getTime() * 1000) + " - median " + getReadableTime(block.getMedianTime() * 1000) + "), " + hash2Nodes.get(hash).size() + " peers:");
+				showEPsForHash(hash2Nodes, hash, true);
 			}
-			if (hash2Nodes.containsKey(NO_BLOCK_KEY) && (!hash2Nodes.get(NO_BLOCK_KEY).isEmpty()))
+			if (hash2EPs.containsKey(NO_BLOCK_KEY) && (!hash2EPs.get(NO_BLOCK_KEY).isEmpty()))
 			{
-				System.out.println("Nodes without blocks:");
-				showNodesForHash(hash2sortedNodes, NO_BLOCK_KEY, true);
-			}
-			if (hash2Nodes.containsKey(DOWN_KEY) && (!hash2Nodes.get(DOWN_KEY).isEmpty()))
-			{
-				System.out.println("Nodes DOWN:");
-				showNodesForHash(hash2sortedNodes, DOWN_KEY, false);
+				System.out.println("EPs without blocks:");
+				showEPsForHash(hash2Nodes, NO_BLOCK_KEY, true);
 			}
 
+			System.out.println();
+			if (hash2sortedEPs.containsKey(DOWN_KEY) && (!hash2sortedEPs.get(DOWN_KEY).isEmpty()))
+			{
+				StringBuilder sb = new StringBuilder("EPs DOWN: ").append(hash2sortedEPs.get(DOWN_KEY).size()).append(": ");
+				boolean first = true;
+				for (EP ep : hash2sortedEPs.get(DOWN_KEY))
+				{
+					if (first)
+						first = false;
+					else
+						sb.append(", ");
+					sb.append(ep.getURL()).append(" (").append(ep.getUpPercent()).append("%)");
+				}
+				System.out.println(sb.toString());
+			}
+
+			System.out.println();
 			// Only the heads of all branches
 			Set<String> headsFound = new HashSet<>();
 			// associate all other hashes in this chain with the head
 			Map<String, Set<String>> head2hashes = new HashMap<>();
-			findHeads(sortedHashes, hash2sortedNodes, headsFound, head2hashes);
+			sortedHashes.remove(NO_BLOCK_KEY);// we don't want to fetch "NO_BLOCK_KEY" as a block, obviously
+			findHeads(sortedHashes, hash2Nodes, headsFound, head2hashes);
 
 			List<String> hashesPerHeight = new ArrayList<>(headsFound);
 			hashesPerHeight.sort(new Comparator<String>()
@@ -664,13 +658,13 @@ public class ExploreNodes
 					{
 						// Compare with the number of members in each
 						int mem1 = 0;
-						for (Node node : hash2Nodes.get(pO1))
-							if (node.getMember() != null)
+						for (Node node : hash2Nodes.get(pO1).keySet())
+							if (node.getEP().getMember() != null)
 								mem1++;
 						int mem2 = 0;
-						for (Node node : hash2Nodes.get(pO2))
-								if (node.getMember() != null)
-									mem2++;
+						for (Node node : hash2Nodes.get(pO2).keySet())
+							if (node.getEP().getMember() != null)
+								mem2++;
 						return -Integer.valueOf(mem1).compareTo(mem2);
 					}
 					return -Long.valueOf(n1).compareTo(n2);
@@ -693,14 +687,18 @@ public class ExploreNodes
 				int nbMirrors = 0;
 				int lateMembers = 0;
 				int lateMirrors = 0;
+				Set<String> membersOnBranch = new HashSet<>();
 				if (extra != null)
 					newNbForks++;
 				for (String associatedHash : head2hashes.get(head))
-					for (Node node : hash2Nodes.get(associatedHash))
+					for (Node node : hash2Nodes.get(associatedHash).keySet())
 					{
+						EP ep = node.getEP();
+						if (ep.getMember() != null)
+							membersOnBranch.add(ep.getMember().getName());
 						if (!associatedHash.equals(head))
-							// This is a late node
-							if (node.getMember() == null)
+							// This is a late EP
+							if (ep.getMember() == null)
 							{
 								if (extra == null)
 									allLateMirrors++;
@@ -721,8 +719,8 @@ public class ExploreNodes
 								totalMembers++;
 							}
 						else
-							// This is a node on the head of this branch
-							if (node.getMember() == null)
+							// This is an EP on the head of this branch
+							if (ep.getMember() == null)
 							{
 								nbMirrors++;
 								totalMirrors++;
@@ -756,7 +754,7 @@ public class ExploreNodes
 						{
 							overForkBlock = forkBlock;
 							// Try to get the block from memory
-							forkBlock = fetchPreviousBlock(forkBlock, head, hash2sortedNodes);
+							forkBlock = fetchPreviousBlock(forkBlock, head, hash2Nodes);
 							if (forkBlock == null)
 								break;
 						}
@@ -765,7 +763,7 @@ public class ExploreNodes
 							// We also need to go to the previous block on main
 							// Try to get the block from memory
 							overMainBlock = mainBlock;
-							mainBlock = fetchPreviousBlock(mainBlock, mainHash, hash2sortedNodes);
+							mainBlock = fetchPreviousBlock(mainBlock, mainHash, hash2Nodes);
 							if (mainBlock == null)
 								break;
 						}
@@ -774,18 +772,23 @@ public class ExploreNodes
 					while (mainBlock != forkBlock);
 					extra = "FORK";
 					if (mainBlock == forkBlock)
-						extra2 = "\n\tforked at block " + mainBlock.getNumber() + " at " + getReadableTime(mainBlock.getTime() * 1000) + "\n\tinto block " + overMainBlock.getInnerHash() + " at " + getReadableTime(overMainBlock.getTime() * 1000) + " (MAIN)\n\t and block " + overForkBlock.getInnerHash() + " at " + getReadableTime(overForkBlock.getTime() * 1000) + " (FORK)";
+					{
+						extra2 = "\n\tforked at block " + mainBlock.getNumber() + " at " + getReadableTime(mainBlock.getTime() * 1000) + "\n";
+						extra2 += "\tinto block " + overMainBlock.getInnerHash() + " at " + getReadableTime(overMainBlock.getTime() * 1000) + " generated by " + overMainBlock.getIssuer().getName() + " (MAIN)\n";
+						extra2 += "\t and block " + overForkBlock.getInnerHash() + " at " + getReadableTime(overForkBlock.getTime() * 1000) + " generated by " + overForkBlock.getIssuer().getName() + " (FORK)";
+					}
 					else
 						extra2 = "\n\t(could not retrieve forking info)";
 				}
+				extra += ", " + membersOnBranch.size() + " members (" + (int)((100.0 * membersOnBranch.size()) / mWorld.getAllMembers().size()) + "%)";
 				if (nbMembers > 0)
-					extra += ", " + nbMembers + " members";
+					extra += ", " + nbMembers + " member peers";
 				if (nbMirrors > 0)
-					extra += ", " + nbMirrors + " mirrors";
+					extra += ", " + nbMirrors + " mirror peers";
 				if (lateMembers > 0)
-					extra += ", " + lateMembers + " LATE members";
+					extra += ", " + lateMembers + " LATE member peers";
 				if (lateMirrors > 0)
-					extra += ", " + lateMirrors + " LATE mirrors";
+					extra += ", " + lateMirrors + " LATE mirror peers";
 				String message = "Hash " + mWorld.getBlockFromHash(head).getInnerHash() + " " + extra + extra2;
 				System.out.println(message);
 			}
@@ -796,7 +799,7 @@ public class ExploreNodes
 			{
 				// Consider that a forked member is counting double
 				double forkStability = Math.max(0.0, 100.0 - 100.0 * ((1.0 * (allForkedMembers * 2 + allForkedMirrors)) / (totalMembers + totalMirrors)));
-				// Late nodes, a mirror node counts half
+				// Late EPs, a mirror EP counts half
 				double lateStability = (totalMembers + totalMirrors - allForkedMembers - allForkedMirrors == 0) ? 0 : 100.0 - (100.0 * (allLateMembers + 1.0 * allLateMirrors / 2)) / (totalMembers + totalMirrors - allForkedMembers - allForkedMirrors);
 				double overallStability = forkStability * lateStability / 100;
 				System.out.println("Stability of network: fork: " + forkStability + ", late: " + lateStability + ", overall: " + overallStability);
@@ -812,18 +815,18 @@ public class ExploreNodes
 			if (trayIcon != null)
 			{
 				trayIcon.setImage(scale(getTrayIconImage(), 24, 24, trayColor));
-				if (currentForks == -1)
-					currentForks = newNbForks;
-				else if (newNbForks > currentForks)
+				if ((currentForks >= 0) && (newNbForks > currentForks))
 					trayIcon.displayMessage("NEW FORK", "Duniter network FORKED!", MessageType.WARNING);
 			}
+			currentForks = newNbForks;
+			System.out.println("Number of forks: " + currentForks);
+			System.out.println("Current number of threads: " + ManagementFactory.getThreadMXBean().getThreadCount());
 			System.out.println("--------------------------------------------------------------------------------------------------------------------------------------------------------------------");
 			Thread.sleep(30000);
-			mNodesFound.clear();
 		}
 	}
 
-	private void findHeads(final SortedSet<String> pSortedHashes, Map<String, List<Node>> pHash2sortedNodes, Set<String> pHeadsFound, Map<String, Set<String>> pHead2hashes)
+	private void findHeads(final SortedSet<String> pSortedHashes, Map<String, SortedMap<Node, Node>> pHash2Nodes, Set<String> pHeadsFound, Map<String, Set<String>> pHead2hashes)
 	{
 		for (String hash : pSortedHashes)
 		{
@@ -853,7 +856,7 @@ public class ExploreNodes
 				do
 				{
 					// Try to get the block from memory
-					current = fetchPreviousBlock(current, head, pHash2sortedNodes);
+					current = fetchPreviousBlock(current, head, pHash2Nodes);
 					if (current == null)
 					// Yikes, we couldn't find that block, too bad, just let's ignore that info
 						break;
@@ -886,7 +889,7 @@ public class ExploreNodes
 		}
 	}
 
-	private Block fetchPreviousBlock(Block pBlock, String pHeadHash, Map<String, List<Node>> pHash2Nodes)
+	private Block fetchPreviousBlock(Block pBlock, String pHeadHash, Map<String, SortedMap<Node, Node>> pHash2Nodes)
 	{
 		Block previousMain = mWorld.getBlockFromHash(pBlock.getPreviousHash());
 		if (previousMain == null)
@@ -904,12 +907,12 @@ public class ExploreNodes
 		return previousMain;
 	}
 
-	public Block fetchBlockFromNode(long pNumber, Node pNode)
+	public Block fetchBlockFromEP(long pNumber, EP pEP)
 	{
 		Map<String, String> receivedURL2EP;
 		try
 		{
-			receivedURL2EP = fetchJSonResponses(pNode, pNumber == -1 ? "/blockchain/current" : "/blockchain/block/" + pNumber, true);
+			receivedURL2EP = fetchJSonResponses(pEP, pNumber == -1 ? "/blockchain/current" : "/blockchain/block/" + pNumber, true);
 		}
 		catch (InterruptedException e)
 		{
@@ -943,15 +946,16 @@ public class ExploreNodes
 		return null;
 	}
 
-	private Block fetchBlock(String pHash, long pNumber, List<Node> pNodes)
+	private Block fetchBlock(String pHash, long pNumber, SortedMap<Node,Node> pNodes)
 	{
-		for (Node node : pNodes)
+		for (Node node : pNodes.keySet())
 		{
-			Block found = fetchBlockFromNode(pNumber, node);
+			EP ep = node.getEP();
+			Block found = fetchBlockFromEP(pNumber, ep);
 			if ((found != null) && found.getHash().equals(pHash))
-			// Great, we found the node with the correct hash, return it
+			// Great, we found the EP with the correct hash, return it
 				return found;
-			// else whoops, this is another hash, maybe that node is not on the same chain anymore, just go on with the search
+			// else whoops, this is another hash, maybe that EP is not on the same chain anymore, just go on with the search
 		}
 		return null;
 	}
@@ -966,9 +970,9 @@ public class ExploreNodes
 		final ExploreNodes exploreNodes = new ExploreNodes();
 		if (args.length >= 1)
 		{
-			final String rootNode = args[0];
-			System.out.println("Exploring from " + rootNode);
-			exploreNodes.explore(rootNode);
+			final String rootEP = args[0];
+			System.out.println("Exploring from " + rootEP);
+			exploreNodes.explore(rootEP);
 		}
 		else
 			exploreNodes.explore("https://g1.duniter.org:443");
@@ -979,72 +983,44 @@ public class ExploreNodes
 		return new SimpleDateFormat("YYYY-MM-dd HH:mm:ss").format(new Date(pCurrentTimeMillis));
 	}
 
-	private void showNodesForHash(Map<String, List<Node>> pHash2Nodes, String pHash, final boolean pShowNodeInfos)
+	private void showEPsForHash(Map<String, SortedMap<Node, Node>> pHash2Nodes, String pHash, final boolean pShowEPInfos)
 	{
-		for (Node node : pHash2Nodes.get(pHash))
+		if (pHash2Nodes.containsKey(pHash))
 		{
-			String nodeInfo = null;
-			String extraInfo;
-			Set<String> extraEndPoints = new HashSet<>(node.getEndPoints());
-			if (node.getPreferredBMAS() != null)
+			System.out.println("\t" + normalize("Member/PK", 15, true) + " " + normalize("Vers.", 6, true) + " " + normalize("Latency", 8, true) + " " + normalize("Pool ID/Mem/Trans", 14, true));
+			for (Node node : pHash2Nodes.get(pHash).keySet())
 			{
-				nodeInfo = formatNodeInfo(node, node.getPreferredBMAS());
-				extraEndPoints.remove(node.getPreferredBMAS());
-			}
-			if (node.getPreferredBMA() != null)
-			{
-				if (nodeInfo == null)
-					nodeInfo = formatNodeInfo(node, node.getPreferredBMA());
+				StringBuilder epInfo = new StringBuilder();
+				for (EP ep : node.getEPs())
+				{
+					if (epInfo.length() > 0)
+						epInfo.append(", ");
+					epInfo.append(formatEPInfo(ep, ep.getURL())).append(" (").append(ep.getKnownPeers().size()).append(" peers, ").append(ep.getSiblings().size()).append(" siblings, " + ep.getUpPercent() + "% up)");
+				}
+				if (pShowEPInfos)
+				{
+					EP ep = node.getEP();
+					String memberInfo = ep.getPubKey();
+					if (ep.getMember() != null)
+						memberInfo = ep.getMember().getName();
+					System.out.println("\t" + normalize(memberInfo, 15, true) + " " + normalize(ep.getVersion(), 6, true) + " " + normalize("" + ep.getAvgResponseTime() + "ms", 8, false) + " " + normalize(String.valueOf(ep.getFreeIdentities()), 4, false) + " " + normalize(String.valueOf(ep.getFreeMemberships()), 4, false) + " " + normalize(String.valueOf(ep.getFreeTransactions()), 3, false) + " " + epInfo.toString());
+				}
 				else
-					nodeInfo += ", " + formatNodeInfo(node, node.getPreferredBMA());
-				extraEndPoints.remove(node.getPreferredBMA());
+					System.out.println("\t" + epInfo.toString());
 			}
-			if (nodeInfo == null)
-			{
-				nodeInfo = "";
-				for (String ep : extraEndPoints)
-				{
-					if (!nodeInfo.isEmpty())
-						nodeInfo += ", ";
-					nodeInfo += formatNodeInfo(node, ep);
-				}
-				extraInfo = "";
-			}
-			else
-			{
-				extraInfo = "";
-				for (String ep : extraEndPoints)
-				{
-					if (!extraInfo.isEmpty())
-						extraInfo += ", ";
-					extraInfo += formatNodeInfo(node, ep);
-				}
-			}
-
-			if (!extraInfo.isEmpty())
-				extraInfo = " (" + extraInfo + ")";
-			if (pShowNodeInfos)
-			{
-				String memberInfo = node.getPubKey();
-				if (node.getMember() != null)
-					memberInfo = node.getMember().getName();
-				System.out.println("\t" + normalize(memberInfo, 15, true) + " " + normalize(node.getVersion(), 6, true) + " " + normalize("" + node.getResponseTime() + "ms", 8, false) + " " + nodeInfo + extraInfo);
-			}
-			else
-				System.out.println("\t" + nodeInfo + " " + extraInfo);
 		}
 	}
 
-	private String formatNodeInfo(Node pNode, String pEndPoint)
+	private String formatEPInfo(EP pEP, String pEndPoint)
 	{
 		String formatted = pEndPoint;
-		if (pNode.isEndPointCertificateError(pEndPoint))
+		if (pEP.isCertificateError())
 			formatted += "!";
-		if (pNode.getEndPointErrors().containsKey(pEndPoint))
+		if (pEP.getError() != null)
 			formatted += " ERR";
 		else
 		{
-			double stability = pNode.getEPStability(pEndPoint);
+			double stability = pEP.getUpPercent();
 			formatted += stability > 90 ? "*" : stability > 50 ? "+" : "-";
 		}
 		return formatted;
