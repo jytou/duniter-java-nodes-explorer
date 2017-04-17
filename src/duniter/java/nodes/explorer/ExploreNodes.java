@@ -1,15 +1,6 @@
 package duniter.java.nodes.explorer;
 
-import java.awt.AWTException;
 import java.awt.Color;
-import java.awt.Graphics2D;
-import java.awt.Image;
-import java.awt.SystemTray;
-import java.awt.Toolkit;
-import java.awt.TrayIcon;
-import java.awt.TrayIcon.MessageType;
-import java.awt.image.BufferedImage;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -21,7 +12,6 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
@@ -430,21 +420,6 @@ public class ExploreNodes
 		System.out.println();
 	}
 
-	private static BufferedImage scale(Image imageToScale, int dWidth, int dHeight, Color pBackground)
-	{
-        BufferedImage scaledImage = null;
-        if (imageToScale != null)
-        {
-            scaledImage = new BufferedImage(dWidth, dHeight, BufferedImage.TYPE_INT_ARGB);
-            Graphics2D graphics2D = scaledImage.createGraphics();
-            graphics2D.setColor(pBackground);
-            graphics2D.fillRect(0, 0, dWidth, dHeight);
-            graphics2D.drawImage(imageToScale, 0, 0, dWidth, dHeight, null);
-            graphics2D.dispose();
-        }
-        return scaledImage;
-    }
-
 	public void offerEP2Query(String pEP)
 	{
 		synchronized (mEPsFound)
@@ -460,44 +435,7 @@ public class ExploreNodes
 
 	public void explore(String pRootEP) throws InterruptedException
 	{
-		TrayIcon trayIcon = null;
-		if (new File("/usr/bin/notify-send").exists())
-		{
-			trayIcon = new TrayIcon(getTrayIconImage())
-			{
-				@Override
-				public void displayMessage(String pCaption, String pText, MessageType pMessageType)
-				{
-					try
-					{
-						new ProcessBuilder(Arrays.asList(new String[] {"/usr/bin/notify-send", "-c", pCaption, pText})).start();
-					}
-					catch (IOException e1)
-					{
-						e1.printStackTrace();// should never happen
-					}
-				}
-			};
-			if (SystemTray.isSupported())
-				try
-				{
-					SystemTray.getSystemTray().add(trayIcon);
-				}
-				catch (AWTException e)
-				{
-					e.printStackTrace();
-				}
-		}
-		else if (SystemTray.isSupported())
-			try
-			{
-				trayIcon = new TrayIcon(getTrayIconImage());
-				SystemTray.getSystemTray().add(trayIcon);
-			}
-			catch (AWTException e1)
-			{
-				e1.printStackTrace();
-			}
+		SystemSignal systemSignal = new SystemSignal();
 		// In the meantime, get the members
 		final EP root = mWorld.offerEndPoint(pRootEP);
 		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members", false);
@@ -812,12 +750,9 @@ public class ExploreNodes
 				System.out.println("No members???");
 				trayColor = Color.red;
 			}
-			if (trayIcon != null)
-			{
-				trayIcon.setImage(scale(getTrayIconImage(), 24, 24, trayColor));
-				if ((currentForks >= 0) && (newNbForks > currentForks))
-					trayIcon.displayMessage("NEW FORK", "Duniter network FORKED!", MessageType.WARNING);
-			}
+			systemSignal.health(trayColor);
+			if ((currentForks >= 0) && (newNbForks > currentForks))
+				systemSignal.displayWarning("NEW FORK", "Duniter network FORKED!");
 			currentForks = newNbForks;
 			System.out.println("Number of forks: " + currentForks);
 			System.out.println("Current number of threads: " + ManagementFactory.getThreadMXBean().getThreadCount());
@@ -958,11 +893,6 @@ public class ExploreNodes
 			// else whoops, this is another hash, maybe that EP is not on the same chain anymore, just go on with the search
 		}
 		return null;
-	}
-
-	private Image getTrayIconImage()
-	{
-		return Toolkit.getDefaultToolkit().getImage(getClass().getResource("duniter-logo24.png"));
 	}
 
 	public static void main(String[] args) throws IOException, ParseException, InterruptedException
