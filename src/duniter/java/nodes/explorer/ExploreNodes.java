@@ -2,14 +2,7 @@ package duniter.java.nodes.explorer;
 
 import java.awt.Color;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.lang.management.ManagementFactory;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLConnection;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -24,22 +17,12 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
 public class ExploreNodes
@@ -52,139 +35,7 @@ public class ExploreNodes
 	private AtomicInteger mNbActive = new AtomicInteger(0);
 	private Semaphore mFinished = new Semaphore(0);
 
-	private BlockingQueue<String> mURLs = new LinkedBlockingQueue<>();
-	private ConcurrentSkipListSet<String> mPreIgnoreCertificateErrors = new ConcurrentSkipListSet<>();
-	private ConcurrentSkipListSet<String> mCertificatesInError = new ConcurrentSkipListSet<>();
-	private ConcurrentMap<String, BlockingQueue<String>> mURLLocks = new ConcurrentHashMap<>();
-	private ConcurrentMap<String, JSONObject> mJSonResults = new ConcurrentHashMap<>();
-	private ConcurrentMap<String, String> mURLErrors = new ConcurrentHashMap<>();
-	private ConcurrentMap<String, MultiConnectThread> mBusyConnectThreads = new ConcurrentHashMap<>();
-
-	private class MultiConnectThread extends Thread
-	{
-		@Override
-		public void run()
-		{
-			super.run();
-			while (true)
-			{
-				String url;
-				try
-				{
-					url = mURLs.take();
-				}
-				catch (InterruptedException e1)
-				{
-					break;
-				}
-				mBusyConnectThreads.put(url, this);
-				try
-				{
-					try
-					{
-						final JSONObject json = fetchInfo(url);
-						mJSonResults.put(url, json);
-					}
-					catch (MalformedURLException e)
-					{
-						mURLErrors.put(url, "MalformedURLException: " + e.getMessage());
-					}
-					catch (IOException e)
-					{
-						mURLErrors.put(url, "IOException: " + e.getMessage());
-					}
-					catch (ParseException e)
-					{
-						mURLErrors.put(url, "ParseException: " + e.getMessage());
-					}
-					final BlockingQueue<String> blockingQueue = mURLLocks.get(url);
-					if (blockingQueue != null)
-						blockingQueue.offer(url);
-				}
-				finally
-				{
-					mBusyConnectThreads.remove(url);
-				}
-			}
-		}
-
-		private JSONObject fetchInfo(String pURL) throws MalformedURLException, IOException, ParseException
-		{
-			URLConnection con = (URLConnection)new URL(pURL).openConnection();
-			con.setReadTimeout(10000);
-			InputStream ins = null;
-			if (mPreIgnoreCertificateErrors.contains(pURL) && (mCertificatesInError.contains(pURL)))
-				ignoreCertificateErrorsOnConnection(con);
-			Object obj = null;
-			try
-			{
-				try
-				{
-					ins = con.getInputStream();
-					// If we were not pre-ignoring bad certificates and the certificate is marked in error, clear the error
-					if (mCertificatesInError.contains(pURL) && (!mPreIgnoreCertificateErrors.contains(pURL)))
-						mCertificatesInError.remove(pURL);
-				}
-				catch (Exception e)
-				{
-					// Could it be that it is a certificate error?
-					if ((con instanceof HttpsURLConnection) && (!mPreIgnoreCertificateErrors.contains(pURL)))
-					{
-						con = (URLConnection)new URL(pURL).openConnection();
-						con.setReadTimeout(10000);
-						ignoreCertificateErrorsOnConnection(con);
-						if (ins == null)
-							ins = con.getInputStream();
-						// Now that we are connected with the ignoring, flag it
-						mCertificatesInError.add(pURL);
-					}
-					else
-						throw e;
-				}
-				InputStreamReader isr = null;
-				try
-				{
-					isr = new InputStreamReader(ins);
-					final JSONParser parser = new JSONParser();
-					obj = parser.parse(isr);
-				}
-				finally
-				{
-					if (isr != null)
-						isr.close();
-				}
-			}
-			finally
-			{
-				if (ins != null)
-					ins.close();
-			}
-			return (JSONObject)obj;
-		}
-
-		private void ignoreCertificateErrorsOnConnection(final URLConnection pConn)
-		{
-			HttpsURLConnection httpsconn = (HttpsURLConnection)pConn;
-			TrustManager[] trustAllCerts = new TrustManager[]{
-				new X509TrustManager()
-				{
-					public X509Certificate[] getAcceptedIssuers(){ return null; }
-					public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-					public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-				}
-			};
-			try
-			{
-				SSLContext sslContext = SSLContext.getInstance("SSL");
-				sslContext.init(null, trustAllCerts, new SecureRandom());
-				httpsconn.setSSLSocketFactory(sslContext.getSocketFactory());
-			}
-			catch (Exception e)
-			{
-				// could not switch the socket factory, ignore
-			}
-		}
-	}
+	private PeerQuery mPeerQuery;
 
 	private class NodeAnalyzer extends Thread
 	{
@@ -198,29 +49,20 @@ public class ExploreNodes
 				{
 					final EP ep = mWorld.getEndPoint(mEPs2Explore.take());
 
-					Map<String, String> receivedURL2EP = fetchJSonResponses(ep, "/network/peering", false);
+					PeerQueryResponse response = mPeerQuery.fetchJSonResponses(ep, "/network/peering", false);
 					final Set<String> foundEndPoints = new HashSet<>();
-					for (String url : receivedURL2EP.keySet())
+					final JSONObject peeringInfo = response.getJSonResult();
+					if (peeringInfo != null)
 					{
-						final JSONObject peeringInfo = mJSonResults.remove(url);
-						if (peeringInfo != null)
+						final String pubkey = (String)peeringInfo.get("pubkey");
+						ep.setPubKey(pubkey);
+						final JSONArray raweps = (JSONArray)peeringInfo.get("endpoints");
+						for (Object epObject : raweps)
 						{
-							final String pubkey = (String)peeringInfo.get("pubkey");
-							ep.setPubKey(pubkey);
-							final JSONArray raweps = (JSONArray)peeringInfo.get("endpoints");
-							for (Object epObject : raweps)
-							{
-								final String epString = (String)epObject;
-								final Set<String> epURLs = getEPStringsFromRawString(epString);
-								for (String epURL : epURLs)
-									foundEndPoints.add(epURL);
-							}
-							ep.setUp(true);
-						}
-						else
-						{
-							ep.setError(mURLErrors.remove(url));
-							ep.setUp(false);
+							final String epString = (String)epObject;
+							final Set<String> epURLs = getEPStringsFromRawString(epString);
+							for (String epURL : epURLs)
+								foundEndPoints.add(epURL);
 						}
 					}
 					if (!foundEndPoints.isEmpty())
@@ -229,33 +71,26 @@ public class ExploreNodes
 					if (ep.isUp())
 					{
 						// for EPs that are UP, let's fetch some more info
-						receivedURL2EP = fetchJSonResponses(ep, "/network/peers", true);
-						for (String url : receivedURL2EP.keySet())
+						response = mPeerQuery.fetchJSonResponses(ep, "/network/peers", true);
+						final JSONObject peersResult = response.getJSonResult();
+						if (peersResult != null)
 						{
-							final JSONObject peersResult = mJSonResults.remove(url);
-							if (peersResult != null)
+							final JSONArray peersArray = (JSONArray)peersResult.get("peers");
+							final Set<String> peers = new HashSet<>();
+							for (Object peerObject : peersArray)
 							{
-								final JSONArray peersArray = (JSONArray)peersResult.get("peers");
-								final Set<String> peers = new HashSet<>();
-								for (Object peerObject : peersArray)
+								final JSONObject jsonPeer = (JSONObject)peerObject;
+								final JSONArray enpointsArray = (JSONArray)jsonPeer.get("endpoints");
+								for (Object endpointObject : enpointsArray)
 								{
-									final JSONObject jsonPeer = (JSONObject)peerObject;
-									final JSONArray enpointsArray = (JSONArray)jsonPeer.get("endpoints");
-									for (Object endpointObject : enpointsArray)
-									{
-										final String endpointString = (String)endpointObject;
-										final Set<String> peersfound = getEPStringsFromRawString(endpointString);
-										peers.addAll(peersfound);
-										for (String peer : peersfound)
-											offerEP2Query(peer);
-									}
+									final String endpointString = (String)endpointObject;
+									final Set<String> peersfound = getEPStringsFromRawString(endpointString);
+									peers.addAll(peersfound);
+									for (String peer : peersfound)
+										offerEP2Query(peer);
 								}
-								ep.setKnownPeers(peers);
-								break;
 							}
-							else
-							// Can not reach that EP, pick the error
-								ep.setError(mURLErrors.remove(url));
+							ep.setKnownPeers(peers);
 						}
 
 						// Fetch the EP's current block
@@ -263,32 +98,25 @@ public class ExploreNodes
 						if (block != null)
 							ep.setCurrentBlock(block);
 
-						receivedURL2EP = fetchJSonResponses(ep, "/node/summary", true);
-						for (String url : receivedURL2EP.keySet())
+						response = mPeerQuery.fetchJSonResponses(ep, "/node/summary", true);
+						final JSONObject info = response.getJSonResult();
+						if (info != null)
 						{
-							final JSONObject info = mJSonResults.remove(url);
-							if (info != null)
-							{
-								final JSONObject duniter = (JSONObject)info.get("duniter");
-								if (ep.getVersion() == null)
-									ep.setVersion((String)duniter.get("version"));
-							}
-							else
-								ep.setError(mURLErrors.remove(url));
+							final JSONObject duniter = (JSONObject)info.get("duniter");
+							if (ep.getVersion() == null)
+								ep.setVersion((String)duniter.get("version"));
 						}
-						receivedURL2EP = fetchJSonResponses(ep, "/node/sandboxes", true);
-						for (String url : receivedURL2EP.keySet())
+
+						response = mPeerQuery.fetchJSonResponses(ep, "/node/sandboxes", true);
+						final JSONObject sandboxes = response.getJSonResult();
+						if (sandboxes != null)
 						{
-							final JSONObject info = mJSonResults.remove(url);
-							if (info != null)
-							{
-								final int id = ((Long)((JSONObject)info.get("identities")).get("free")).intValue();
-								final int mem = ((Long)((JSONObject)info.get("memberships")).get("free")).intValue();
-								final int trans = ((Long)((JSONObject)info.get("transactions")).get("free")).intValue();
-								ep.setFreeIdentities(id);
-								ep.setFreeMemberships(mem);
-								ep.setFreeTransactions(trans);
-							}
+							final int id = ((Long)((JSONObject)sandboxes.get("identities")).get("free")).intValue();
+							final int mem = ((Long)((JSONObject)sandboxes.get("memberships")).get("free")).intValue();
+							final int trans = ((Long)((JSONObject)sandboxes.get("transactions")).get("free")).intValue();
+							ep.setFreeIdentities(id);
+							ep.setFreeMemberships(mem);
+							ep.setFreeTransactions(trans);
 						}
 					}
 
@@ -317,107 +145,12 @@ public class ExploreNodes
 		return peersfound;
 	}
 
-	private Map<String, String> fetchJSonResponses(final EP pEndPoint, final String pSuffix, final boolean pPreIgnoreCertificatesInError) throws InterruptedException
-	{
-		final BlockingQueue<String> receivingQueue = new LinkedBlockingQueue<>();
-		final Map<String, String> waitingURL2EP = new HashMap<>();
-		String ep = pEndPoint.getURL();
-		String url = ep + pSuffix;
-
-		waitingURL2EP.put(url, ep);
-		mURLErrors.remove(url);
-		mURLLocks.put(url, receivingQueue);
-		if (pEndPoint.isCertificateError())
-		{
-			mCertificatesInError.add(url);
-			if (pPreIgnoreCertificatesInError)
-				mPreIgnoreCertificateErrors.add(url);
-		}
-		mURLs.offer(url);
-
-		long time = System.currentTimeMillis();
-		final Map<String, String> receivedURL2EP = new HashMap<>();
-		final Set<String> okBMASs = new HashSet<>();
-		String firstAnsweringBMAS = null;
-		final Set<String> okBMAs = new HashSet<>();
-		String firstAnsweringBMA = null;
-		long responseTime = -1;
-//		for (int iEP = 0; iEP < pEndPoints.size(); iEP++)
-//		{
-			final long time2wait = 10000 - (System.currentTimeMillis() - time);
-			url = time2wait > 0 ? receivingQueue.poll(time2wait, TimeUnit.MILLISECONDS) : null;
-			if (url == null)
-			{
-				// We have waited too long anyway, finish all
-				while (!waitingURL2EP.isEmpty())
-				{
-					final String retrievedURL = waitingURL2EP.keySet().iterator().next();
-					final MultiConnectThread connectThread = mBusyConnectThreads.remove(retrievedURL);
-					if (connectThread != null)
-					{
-						connectThread.interrupt();
-						new MultiConnectThread().start();
-					}
-					waitingURL2EP.remove(retrievedURL);
-					mPreIgnoreCertificateErrors.remove(retrievedURL);
-					mCertificatesInError.remove(retrievedURL);
-					pEndPoint.setUp(false);
-					mJSonResults.remove(retrievedURL);
-					pEndPoint.setError(mURLErrors.remove(retrievedURL));
-				}
-				return receivedURL2EP;
-			}
-			boolean isOK = mJSonResults.get(url) != null;
-			final String endPoint = waitingURL2EP.remove(url);
-			mPreIgnoreCertificateErrors.remove(url);
-			if (isOK)
-			{
-				if (responseTime == -1)
-					responseTime = System.currentTimeMillis() - time;
-				pEndPoint.setUp(true);
-				receivedURL2EP.put(url, endPoint);
-				if (endPoint.startsWith("https"))
-				{
-					okBMASs.add(endPoint);
-					if (firstAnsweringBMAS == null)
-						firstAnsweringBMAS = endPoint;
-				}
-				else
-				{
-					okBMAs.add(endPoint);
-					if (firstAnsweringBMA == null)
-						firstAnsweringBMA = endPoint;
-				}
-			}
-			else
-			{
-				pEndPoint.setError(mURLErrors.remove(url));
-				pEndPoint.setUp(false);
-			}
-			pEndPoint.setCertificateError(mCertificatesInError.remove(url));// if remove() is not successful, it is because there was no such element
-			mURLLocks.remove(url);
-//		}
-		if (responseTime != -1)
-			pEndPoint.addResponseTime(responseTime);
-		return receivedURL2EP;
-	}
-
 	public ExploreNodes()
 	{
 		super();
 		mWorld = new World();
 		for (int i = 0; i < 50; i++)
-		{
-			System.out.print(".");
 			new NodeAnalyzer().start();
-		}
-		System.out.println();
-		for (int i = 0; i < 100; i++)
-		{
-			System.out.print(".");
-			new MultiConnectThread().start();
-		}
-		System.out.println();
 	}
 
 	public void offerEP2Query(String pEP)
@@ -438,43 +171,42 @@ public class ExploreNodes
 		SystemSignal systemSignal = new SystemSignal();
 		// In the meantime, get the members
 		final EP root = mWorld.offerEndPoint(pRootEP);
-		final Map<String, String> membersUrl = fetchJSonResponses(root, "/wot/members", false);
-		for (String url : membersUrl.keySet())
+		mPeerQuery = new PeerQuery();
+		final PeerQueryResponse response = mPeerQuery.fetchJSonResponses(root, "/wot/members", false);
+		final JSONObject jsonResult = response.getJSonResult();
+		if (jsonResult != null)
 		{
-			final JSONObject jsonResult = mJSonResults.remove(url);
-			if (jsonResult != null)
+			final JSONArray jsonMembers = (JSONArray)jsonResult.get("results");
+			for (Object objectMember : jsonMembers)
 			{
-				final JSONArray jsonMembers = (JSONArray)jsonResult.get("results");
-				for (Object objectMember : jsonMembers)
+				final JSONObject jsonMember = (JSONObject)objectMember;
+				final String name = (String)jsonMember.get("uid");
+				final String pk = (String)jsonMember.get("pubkey");
+				synchronized (mWorld)
 				{
-					final JSONObject jsonMember = (JSONObject)objectMember;
-					final String name = (String)jsonMember.get("uid");
-					final String pk = (String)jsonMember.get("pubkey");
-					synchronized (mWorld)
-					{
-						Member member = mWorld.getMember(pk);
-						if (member == null)
-							mWorld.addMember(new Member(pk, name));
-						else if (member.getName() == null)
-							member.setName(name);
-					}
+					Member member = mWorld.getMember(pk);
+					if (member == null)
+						mWorld.addMember(new Member(pk, name));
+					else if (member.getName() == null)
+						member.setName(name);
 				}
 			}
-			else
-				System.err.println(mJSonResults.remove(url));
 		}
+		else
+			throw new RuntimeException("Could not contact root node. You can specify another one on the commaand line");
 		System.out.println("Number of members: " + mWorld.getAllMembers().size());
 		int currentForks = -1;
 		mEPsFound.add(pRootEP);
 		while (true)
 		{
-			System.out.println("Probing... (" + getReadableTime(System.currentTimeMillis()) + ")");
+			final long startTime = System.currentTimeMillis();
+			System.out.println("Probing... (" + getReadableTime(startTime) + ")");
 			Set<String> toOffer = new HashSet<>(mEPsFound);
 			mEPsFound.clear();
 			for (String ep2offer : toOffer)
 				offerEP2Query(ep2offer);
 			mFinished.acquire();
-			System.out.println("Status as of " + getReadableTime(System.currentTimeMillis()) + ":");
+			System.out.println("Status as of " + getReadableTime(System.currentTimeMillis()) + " (" + ((System.currentTimeMillis() - startTime) / 1000) + " seconds later):");
 			final Map<String, List<EP>> hash2EPs = new HashMap<>();
 			for (EP ep : mWorld.getAllEndPoints())
 			{
@@ -844,18 +576,10 @@ public class ExploreNodes
 
 	public Block fetchBlockFromEP(long pNumber, EP pEP)
 	{
-		Map<String, String> receivedURL2EP;
-		try
+		PeerQueryResponse response = mPeerQuery.fetchJSonResponses(pEP, pNumber == -1 ? "/blockchain/current" : "/blockchain/block/" + pNumber, true);
+		if (response.getJSonResult() != null)
 		{
-			receivedURL2EP = fetchJSonResponses(pEP, pNumber == -1 ? "/blockchain/current" : "/blockchain/block/" + pNumber, true);
-		}
-		catch (InterruptedException e)
-		{
-			return null;// should never happen
-		}
-		for (String url : receivedURL2EP.keySet())
-		{
-			final JSONObject curblock = mJSonResults.remove(url);
+			final JSONObject curblock = response.getJSonResult();
 			if (curblock != null)
 			{
 				final String hash = (String)curblock.get("hash");
@@ -874,9 +598,7 @@ public class ExploreNodes
 				final String previousHash = (String)curblock.get("previousHash");
 				block = mWorld.offerBlock(new Block(blockNum, nonce, time, medianTime, issuer, innerhash, hash, previousHash));
 				return block;
-			}
-			else
-				mURLErrors.remove(url);
+			} // else we couldn't reach the peer, we'll return null
 		}
 		return null;
 	}
