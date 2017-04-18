@@ -2,7 +2,6 @@ package duniter.java.nodes.explorer;
 
 import java.awt.Color;
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -358,8 +357,6 @@ public class ExploreNodes
 				int lateMembers = 0;
 				int lateMirrors = 0;
 				Set<String> membersOnBranch = new HashSet<>();
-				if (extra != null)
-					newNbForks++;
 				for (String associatedHash : head2hashes.get(head))
 					for (Node node : hash2Nodes.get(associatedHash).keySet())
 					{
@@ -413,6 +410,7 @@ public class ExploreNodes
 					extra = "ASTRAY";
 				else
 				{
+					newNbForks++;
 					// Find the fork point
 					Block mainBlock = mWorld.getBlockFromHash(mainHash);
 					Block overMainBlock = mainBlock;
@@ -487,8 +485,26 @@ public class ExploreNodes
 				systemSignal.displayWarning("NEW FORK", "Duniter network FORKED!");
 			currentForks = newNbForks;
 			System.out.println("Number of forks: " + currentForks);
-			System.out.println("Current number of threads: " + ManagementFactory.getThreadMXBean().getThreadCount());
+//			System.out.println("Current number of threads in JVM: " + ManagementFactory.getThreadMXBean().getThreadCount());
+//			System.out.println("Corrent number of queroying threads: " + mPeerQuery.mNbRunningThreads.get());
+//			System.out.println("this: " + MemoryMeasurer.measureBytes(this));
+//			System.out.println("mEPs2Explore: " + MemoryMeasurer.measureBytes(mEPs2Explore) + " size " + mEPs2Explore.size());
+//			System.out.println("mEPsFound: " + MemoryMeasurer.measureBytes(mEPsFound) + " size " + mEPsFound.size());
+//			System.out.println("mWorld: " + MemoryMeasurer.measureBytes(mWorld));
+//			System.out.println("mWorld.mEPs: " + MemoryMeasurer.measureBytes(mWorld.mEPs) + " size " + mWorld.mEPs.size());
+//			System.out.println("mWorld.mHash2Block: " + MemoryMeasurer.measureBytes(mWorld.mHash2Block) + " size " + mWorld.mHash2Block.size());
+//			System.out.println("mPeerQuery: " + MemoryMeasurer.measureBytes(mPeerQuery));
+//			System.out.println("mPeerQuery.mBusyConnectThreads: " + MemoryMeasurer.measureBytes(mPeerQuery.mBusyConnectThreads) + " size " + mPeerQuery.mBusyConnectThreads.size());
+//			System.out.println("mPeerQuery.mURLs: " + MemoryMeasurer.measureBytes(mPeerQuery.mURLs) + " size " + mPeerQuery.mURLs.size());
+//			System.out.println("mPeerQuery.mURLLocks: " + MemoryMeasurer.measureBytes(mPeerQuery.mURLLocks) + " size " + mPeerQuery.mURLLocks.size());
+//			System.out.println("mPeerQuery.mJSonResults: " + MemoryMeasurer.measureBytes(mPeerQuery.mJSonResults) + " size " + mPeerQuery.mJSonResults.size());
+//			System.out.println("mPeerQuery.mURLErrors: " + MemoryMeasurer.measureBytes(mPeerQuery.mURLErrors) + " size " + mPeerQuery.mURLErrors.size());
+//			System.out.println("mPeerQuery.mResponseTimes: " + MemoryMeasurer.measureBytes(mPeerQuery.mResponseTimes) + " size " + mPeerQuery.mResponseTimes.size());
+//			System.out.println("mPeerQuery.mPickedURL: " + MemoryMeasurer.measureBytes(mPeerQuery.mPickedURL) + " size " + mPeerQuery.mPickedURL.size());
+//			System.out.println("Memory: free " + String.format("%,d", Runtime.getRuntime().freeMemory()) + " total " + String.format("%,d", Runtime.getRuntime().totalMemory()));
 			System.out.println("--------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+			// Enjoy a little GC
+			System.gc();
 			Thread.sleep(30000);
 		}
 	}

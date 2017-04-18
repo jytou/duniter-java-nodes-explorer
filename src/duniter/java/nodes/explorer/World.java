@@ -7,12 +7,12 @@ import java.util.Set;
 
 public class World
 {
-	private Map<String, EP> mEPs = new HashMap<>();// All endpoints
+	 Map<String, EP> mEPs = new HashMap<>();// All endpoints
 //	private Map<Node, Set<String>> mNode2EPs = new HashMap<>();// Node to its currently known endpoints
-	private Map<String, Member> mId2Member = new HashMap<>();
-	private Map<String, Member> mPK2Member = new HashMap<>();
-	private Map<String, Block> mHash2Block = new HashMap<>();
-	private Map<String, Block> mPreviousHash2Block = new HashMap<>();
+	 Map<String, Member> mId2Member = new HashMap<>();
+	 Map<String, Member> mPK2Member = new HashMap<>();
+	 Map<String, Block> mHash2Block = new HashMap<>();
+	 Map<String, Block> mPreviousHash2Block = new HashMap<>();
 
 	public Set<EP> getAllEndPoints()
 	{
